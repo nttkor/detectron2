@@ -1,0 +1,65 @@
+name: Model Training
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_file:
+        description: 'Config file path'
+        required: false
+        default: ''
+      num_gpus:
+        description: 'Number of GPUs'
+        required: false
+        default: '1'
+      resume:
+        description: 'Resume from checkpoint'
+        required: false
+        default: 'false'
+
+jobs:
+  train:
+    name: Train Model
+    runs-on: ubuntu-latest
+    # GPU 러너가 필요한 경우 아래 주석 해제
+    # runs-on: [self-hosted, gpu]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch torchvision torchaudio
+        pip install opencv-python pillow numpy matplotlib
+        pip install 'git+https://github.com/facebookresearch/detectron2.git'
+        
+    - name: Download dataset (if needed)
+      run: |
+        echo "Dataset download logic would go here"
+        # 실제 데이터셋 다운로드 로직 추가 필요
+      continue-on-error: true
+      
+    - name: Train model
+      run: |
+        echo "Training command would go here"
+        # 예시: python train.py --config-file configs/parking_detection.yaml
+        # 실제 학습 스크립트 경로로 수정 필요
+      continue-on-error: true
+      
+    - name: Upload model artifacts
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: trained-model
+        path: |
+          output/
+          *.pth
+          *.pkl
+        retention-days: 7
+
