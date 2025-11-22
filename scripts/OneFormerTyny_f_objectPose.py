@@ -1,0 +1,2835 @@
+"""
+================================================================================
+OneFormer Panoptic Segmentation + Depth Estimation - 3D Primitive Face Instance Segmentation
+ADE20K 공식 Thing/Stuff 분류 (CSAILVision MIT) + PCA 기반 3D Pose 추정 + Face Instance 생성
+================================================================================
+
+[프로그램 개요]
+이 프로그램은 OneFormer 딥러닝 모델을 사용하여 이미지의 Panoptic Segmentation을 수행하고,
+MiDaS 모델을 사용하여 Depth Estimation을 수행한 후, PCA 기반 3D Pose 추정을 통해
+각 객체의 3D Primitive (Cube, Cylinder, Plane 등)를 추정하고, 각 Primitive의 Face를
+새로운 Instance Segmentation으로 생성하여 시각화하는 고급 인터랙티브 도구입니다.
+
+[핵심 혁신 아이디어]
+기존 접근: 단순히 선을 그려서 시각화만 함
+새로운 접근: 
+  1. Segmentation mask + depth → 3D Primitive 추정 (PCA 기반)
+  2. Primitive의 Face 정의 (예: Cube는 6개 Face)
+  3. 각 Face를 2D로 투영하여 새로운 Mask 생성
+  4. 각 Face Mask를 새로운 Instance Segmentation으로 추가
+  5. Face Instance를 개별적으로 시각화/분석 가능
+
+[설계 계획]
+
+1. 3D Primitive 추정 모듈
+   - 입력: Segmentation mask, Depth map, Class name
+   - 처리:
+     a. Mask 내부 픽셀들을 3D Point Cloud로 변환 (Back-projection)
+     b. PCA를 적용하여 객체의 중심(T), 회전(R), 크기(S) 추정
+     c. Class name에 따라 적절한 Primitive 선택 (Cube/Cylinder/Plane)
+   - 출력: 3D Primitive의 위치, 회전, 크기 정보
+
+2. Face 정의 모듈
+   - Cube: 6개 Face 정의
+     * 앞면 (Front): [0,1,2,3]
+     * 뒷면 (Back): [4,5,6,7]
+     * 위면 (Top): [3,2,6,7]
+     * 아래면 (Bottom): [0,1,5,4]
+     * 왼쪽면 (Left): [0,3,7,4]
+     * 오른쪽면 (Right): [1,2,6,5]
+   - Cylinder: 3개 Face 정의 (윗면, 아랫면, 옆면)
+   - Plane: 1개 Face 정의 (단일 평면)
+
+3. Face 투영 모듈
+   - 입력: Face의 3D 정점들, 카메라 행렬(K), 회전(R), 위치(T), 크기(S)
+   - 처리:
+     a. 3D 정점들을 World 좌표계로 변환: P_world = R * (S * P_local) + T
+     b. 카메라 좌표계로 변환: P_cam = K * P_world
+     c. 2D 투영: (u, v) = (P_cam[0]/P_cam[2], P_cam[1]/P_cam[2])
+     d. Polygon mask 생성: cv2.fillPoly()로 Face 영역 채우기
+     e. 원본 Segmentation mask와 교차하여 최종 Face mask 생성
+   - 출력: 2D Face mask (boolean array)
+
+4. Face Instance 생성 모듈
+   - 입력: 원본 seg_map, segments_info, 각 객체의 Face masks
+   - 처리:
+     a. 각 객체의 각 Face에 대해:
+        - 새로운 Instance ID 생성: original_id * 100 + face_index
+        - Face mask를 seg_map에 추가
+        - segments_info에 Face 정보 추가 (id, label_id, score, is_face=True 등)
+     b. Face Instance는 원본 객체와 연결 정보 유지
+   - 출력: 확장된 seg_map, 확장된 segments_info
+
+5. 시각화 모듈
+   - 원본 Instance: 기존 방식대로 시각화
+   - Face Instance: 
+     * 다른 색상으로 표시 (예: 원본 색상의 밝기 조정)
+     * Face 이름 표시 (예: "bed_front", "bed_top")
+     * 선택적으로 Face만 표시 가능
+
+6. 인터랙티브 기능 확장
+   - F 키: Face Instance 표시/숨김 토글
+   - 마우스 호버: Face Instance 정보도 표시
+   - 클릭: Face Instance도 선택 가능
+
+[데이터 구조]
+
+Face Instance 정보:
+{
+    'id': int,                    # Face Instance ID (original_id * 100 + face_index)
+    'original_id': int,           # 원본 Instance ID
+    'face_index': int,            # Face 인덱스 (0~5 for cube)
+    'face_name': str,             # Face 이름 ("front", "back", "top", etc.)
+    'label_id': int,              # 원본 객체의 label_id
+    'score': float,               # 원본 객체의 score
+    'is_face': True,              # Face Instance임을 표시
+    'mask': np.ndarray,           # Face mask (optional, 캐싱용)
+}
+
+[구현 단계]
+
+Phase 1: 기본 인프라 구축
+  - 3D Geometry 유틸리티 함수 추가 (back_projection, PCA, projection)
+  - Primitive 정의 클래스 (MeshManager)
+  - Face 정의 데이터 구조
+
+Phase 2: 3D Primitive 추정
+  - estimate_3d_primitive() 함수 구현
+  - 카메라 행렬(K) 추정/가정
+  - PCA 기반 Pose 추정
+
+Phase 3: Face 투영 및 Mask 생성
+  - project_face_to_2d() 함수 구현
+  - create_face_mask() 함수 구현
+  - 원본 mask와의 교차 처리
+
+Phase 4: Face Instance 생성
+  - create_face_instances() 함수 구현
+  - seg_map 확장
+  - segments_info 확장
+
+Phase 5: 시각화 통합
+  - visualize_cv2_all() 함수 수정
+  - Face Instance 시각화 추가
+  - 인터랙티브 기능 확장
+
+Phase 6: 최적화 및 테스트
+  - 성능 최적화 (캐싱, 병렬 처리)
+  - Edge case 처리
+  - 사용자 테스트 및 피드백 반영
+
+[핵심 기술 스택]
+1. AI 모델:
+   - Segmentation: shi-labs/oneformer_ade20k_swin_large (OneFormer)
+   - Depth Estimation: Intel/dpt-hybrid-midas (MiDaS via pipeline)
+   - 데이터셋: ADE20K (150개 클래스, Thing/Stuff 공식 분류)
+
+2. 컴퓨터 비전 기술:
+   - 소실점 검출: Hough Transform + 최소 제곱법
+   - Depth Edge 검출: Sobel 필터 기반 gradient 분석
+   - 이미지 Edge 검출: Canny 엣지 검출
+   - Depth 보정: 소실점 기반 원근법 보정
+
+3. 3D 시각화:
+   - 클래스별 3D 구조 추론 (cube, cylinder, plane, sphere 등)
+   - Depth 기반 내부 구조 선 그리기
+   - 이미지 edge와 depth edge 결합
+   - 마스크 제약 선 그리기 (세그먼트 내부에만)
+
+[주요 기능 모듈]
+
+1. 소실점 검출 (VanishingPointDetector)
+   - Canny 엣지 검출 → Hough Transform 직선 검출
+   - 대각선 방향 직선 분석 → 최소 제곱법으로 소실점 계산
+   - 소실점 기반 depth 보정 및 3D 구조 그리기에 활용
+
+2. Depth 보정 (correct_depth_with_vanishing_point)
+   - 소실점에서 각 픽셀까지의 거리 계산
+   - 소실점 방향으로 갈수록 depth 감소 (더 먼 것으로 보정)
+   - 보정 강도 조절 가능 (weight 파라미터, 기본값 0.3)
+
+3. 클래스별 3D 구조 그리기
+   - get_shape_type_from_class: 클래스 이름 → 3D 형태 타입 매핑
+   - draw_cube_perspective: 큐브 (depth edge + 이미지 edge 결합)
+   - draw_person_structure: 사람 (실린더 + 골격 구조)
+   - draw_cylinder_symmetric: 실린더 (기둥, 나무 등)
+   - draw_plane_structure: 평면 (벽, 바닥, 천장 - 접힌 종이 효과)
+   - draw_contour_lines: 등고선 (산, 땅)
+   - draw_wall_structure: 벽 (floor/ceiling과의 경계선 포함)
+   - draw_building_structure: 건물 (외곽선 + 폴리곤)
+   - draw_lamp_structure: 램프 (원형 대칭)
+   - draw_line_in_mask: 마스크 내부에만 선 그리기 (제1원칙)
+
+4. 인터랙티브 기능
+   - 키보드 입력:
+     * A/←: 이전 이미지
+     * D/→: 다음 이미지
+     * S: Depth Map 모드 토글 (밝기 = 가까움)
+     * E: 3D 박스 표시 토글
+     * Q: 종료
+   - 마우스 입력:
+     * 이동: 실시간 세그먼트 정보 표시 (클래스명, ID, depth)
+     * 왼쪽 클릭: 세그먼트 선택 (같은 클래스면 소실점에서 멀리 떨어진 것 우선)
+     * 오른쪽 클릭: 모든 인스턴스 표시
+
+5. 시각화 기능
+   - Thing: 외곽선 (노란색 텍스트)
+   - Stuff: 반투명 오버레이 (흰색 텍스트)
+   - Depth Map 모드: depth 맵을 배경으로 사용 (밝기 = 가까움)
+   - 3D 구조: 클래스별 적절한 3D 형태 그리기
+   - 마우스 정보: 실시간 세그먼트 정보 오버레이
+
+[데이터 흐름]
+1. 이미지 로드 → 2. Segmentation 추론 → 3. Depth 추론 → 4. 소실점 검출
+→ 5. Depth 보정 → 6. 시각화 (Stuff 오버레이 + Thing 외곽선 + 3D 구조)
+→ 7. 사용자 인터랙션 처리 → 8. 결과 업데이트
+
+[핵심 알고리즘]
+- 소실점 검출: Hough Transform으로 직선 검출 → 최소 제곱법으로 교점 계산
+- Depth 보정: 소실점 거리 기반 가중치 적용 (소실점 방향 = 더 먼 것으로)
+- Edge 결합: Depth edge (Sobel) + 이미지 edge (Canny) → 더 정확한 구조선
+- 마스크 제약: 모든 선은 세그먼트 마스크 내부에만 그려짐 (Bresenham 알고리즘)
+
+[성능 최적화]
+- 추론 결과 캐싱 (이미지 변경 시에만 재추론)
+- 모드 전환 시 재추론 없이 시각화만 업데이트
+- waitKey(1)로 마우스 이벤트 실시간 처리
+
+[사용 예시]
+- 이미지 디렉토리에서 JPG 파일 자동 로드
+- 첫 번째 이미지 자동 추론 및 표시
+- 마우스 이동으로 세그먼트 정보 확인
+- S 키로 Depth Map 모드 전환
+- E 키로 3D 구조 표시
+- 마우스 클릭으로 특정 세그먼트 선택/해제
+"""
+
+import os  # 파일 시스템 경로 조작
+import glob  # 파일 패턴 매칭
+import math  # 수학 연산
+import torch  # PyTorch 딥러닝 프레임워크
+import cv2  # OpenCV 이미지 처리
+import time  # 시간 측정
+import numpy as np  # 수치 연산
+from PIL import Image  # PIL 이미지 처리
+from transformers import (  # Transformers 라이브러리
+    OneFormerProcessor, 
+    OneFormerForUniversalSegmentation,
+    pipeline
+)
+
+# ============================================================================
+# 상수 정의
+# ============================================================================
+IMAGE_DIR = r"D:/git/detectron2/ade20k_consistency/original_ade20k"  # 이미지 디렉토리 경로
+SEGMENTATION_MODEL = "shi-labs/oneformer_ade20k_swin_large"  # Segmentation 모델
+DEPTH_MODEL = "Intel/dpt-hybrid-midas"  # Depth Estimation 모델 (빠른 버전)
+TARGET_HEIGHT = 800  # 시각화 목표 높이
+FOCAL_LENGTH = 1000.0  # 카메라 초점거리 (가정값, 상대적 depth에만 사용)
+
+# ============================================================================
+# Unit Primitive 정의 (3D 기하학 도형)
+# ============================================================================
+
+# Unit Cube (단위 정육면체) - 중심이 (0,0,0), 크기가 1
+UNIT_CUBE_VERTICES = np.array([
+    [-0.5, -0.5, -0.5],  # 0: 왼쪽 아래 앞
+    [ 0.5, -0.5, -0.5],  # 1: 오른쪽 아래 앞
+    [ 0.5,  0.5, -0.5],  # 2: 오른쪽 위 앞
+    [-0.5,  0.5, -0.5],  # 3: 왼쪽 위 앞
+    [-0.5, -0.5,  0.5],  # 4: 왼쪽 아래 뒤
+    [ 0.5, -0.5,  0.5],  # 5: 오른쪽 아래 뒤
+    [ 0.5,  0.5,  0.5],  # 6: 오른쪽 위 뒤
+    [-0.5,  0.5,  0.5],  # 7: 왼쪽 위 뒤
+])
+
+# Cube Face 정의 (각 Face는 정점 인덱스 리스트)
+CUBE_FACES = {
+    'front': [0, 1, 2, 3],      # 앞면
+    'back': [4, 5, 6, 7],       # 뒷면
+    'top': [3, 2, 6, 7],        # 위면
+    'bottom': [0, 1, 5, 4],     # 아래면
+    'left': [0, 3, 7, 4],       # 왼쪽면
+    'right': [1, 2, 6, 5]       # 오른쪽면
+}
+
+# Unit Cylinder (단위 원기둥) - 8각형으로 근사
+def _generate_cylinder_vertices():
+    """원기둥 정점 생성 (8각형 근사)"""
+    segments = 8  # 원을 8각형으로 근사
+    verts = []
+    for y in [-0.5, 0.5]:  # 아래 원과 위 원
+        for i in range(segments):
+            theta = 2 * np.pi * i / segments
+            verts.append([0.5 * np.cos(theta), y, 0.5 * np.sin(theta)])
+    return np.array(verts)
+
+UNIT_CYLINDER_VERTICES = _generate_cylinder_vertices()
+
+# Cylinder Face 정의
+CYLINDER_FACES = {
+    'top': list(range(8, 16)),      # 윗면 원 (8개 정점)
+    'bottom': list(range(8)),       # 아랫면 원 (8개 정점)
+    'side': []  # 옆면은 나중에 계산 (위아래 원 연결)
+}
+# 옆면: 각 세그먼트마다 사각형
+for i in range(8):
+    next_i = (i + 1) % 8
+    CYLINDER_FACES['side'].extend([i, next_i, next_i + 8, i + 8])
+
+# Unit Plane (단위 평면) - XZ 평면상에 누워있는 사각형
+UNIT_PLANE_VERTICES = np.array([
+    [-0.5, 0, -0.5],  # 0: 왼쪽 뒤
+    [ 0.5, 0, -0.5],  # 1: 오른쪽 뒤
+    [ 0.5, 0,  0.5],  # 2: 오른쪽 앞
+    [-0.5, 0,  0.5],  # 3: 왼쪽 앞
+])
+
+# Plane Face 정의
+PLANE_FACES = {
+    'surface': [0, 1, 2, 3]  # 단일 평면
+}
+
+# Unit Primitive 딕셔너리
+UNIT_PRIMITIVES = {
+    'cube': {
+        'vertices': UNIT_CUBE_VERTICES,
+        'faces': CUBE_FACES
+    },
+    'cylinder': {
+        'vertices': UNIT_CYLINDER_VERTICES,
+        'faces': CYLINDER_FACES
+    },
+    'plane': {
+        'vertices': UNIT_PLANE_VERTICES,
+        'faces': PLANE_FACES
+    }
+}
+
+# ============================================================================
+# 소실점 검출기 (Vanishing Point Detector)
+# ============================================================================
+
+class VanishingPointDetector:
+    """
+    이미지 내의 직선들을 분석하여 주 소실점(Dominant Vanishing Point)을 추정하는 클래스
+    """
+    def find_vanishing_point(self, image):
+        """
+        이미지에서 소실점 (vx, vy)를 찾아 반환합니다. 실패 시 이미지 중심을 반환합니다.
+        
+        Args:
+            image (numpy.ndarray): 입력 이미지 (BGR 형식)
+        
+        Returns:
+            tuple: (vx, vy) 소실점 좌표
+        """
+        h, w = image.shape[:2]  # 이미지 크기
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # 그레이스케일 변환
+        
+        # 1. 엣지 검출 (Canny)
+        edges = cv2.Canny(gray, 50, 150, apertureSize=3)  # Canny 엣지 검출
+        
+        # 2. 직선 검출 (Hough Transform)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=50, maxLineGap=10)  # 직선 검출
+        
+        if lines is None:  # 직선이 없으면
+            return (w // 2, h // 2)  # 이미지 중심 반환
+
+        filtered_lines = []  # 필터링된 직선 리스트
+        for line in lines:  # 각 직선에 대해
+            x1, y1, x2, y2 = line[0]  # 직선의 두 점
+            if x1 == x2:  # 수직선이면 건너뛰기
+                continue
+            
+            slope = (y2 - y1) / (x2 - x1)  # 기울기 계산
+            angle = math.degrees(math.atan(slope))  # 각도 계산
+            
+            # 대각선 방향의 선들만 수집 (VP를 찾기 위한 주된 단서)
+            if 15 < abs(angle) < 75:  # 15도~75도 사이의 대각선만
+                filtered_lines.append((x1, y1, x2, y2, slope))  # 직선 정보 추가
+
+        if not filtered_lines:  # 필터링된 직선이 없으면
+            return (w // 2, h // 2)  # 이미지 중심 반환
+
+        A_matrix = []  # 행렬 A
+        b_vector = []  # 벡터 b
+        
+        for x1, y1, x2, y2, m in filtered_lines:  # 각 직선에 대해
+            # Line equation: mx - y = -(y1 - m*x1)
+            c = y1 - m * x1  # 상수항
+            A_matrix.append([m, -1])  # 행렬 A에 추가
+            b_vector.append([-c])  # 벡터 b에 추가
+            
+        if len(A_matrix) < 2:  # 직선이 2개 미만이면
+            return (w // 2, h // 2)  # 이미지 중심 반환
+
+        try:
+            A = np.array(A_matrix)  # 행렬 A 생성
+            b = np.array(b_vector)  # 벡터 b 생성
+            # 최소 제곱법을 이용해 해(x, y) = 소실점을 구함
+            vx, vy = np.linalg.lstsq(A, b, rcond=None)[0]  # 최소 제곱법으로 소실점 계산
+            vx, vy = int(vx), int(vy)  # 정수로 변환
+            
+            # 소실점이 화면 밖 너무 멀리 있으면 중심점으로 제한
+            if not (-2*w < vx < 3*w and -2*h < vy < 3*h):  # 범위 밖이면
+                 return (w // 2, h // 2)  # 이미지 중심 반환
+                 
+            return (vx, vy)  # 소실점 반환
+        except:  # 예외 발생 시
+            return (w // 2, h // 2)  # 이미지 중심 반환
+
+
+# ============================================================================
+# 3D Geometry 유틸리티 함수
+# ============================================================================
+
+def get_camera_matrix(W, H, focal_length=FOCAL_LENGTH):
+    """
+    카메라 내부 파라미터 행렬(K)을 생성합니다.
+    
+    Args:
+        W (int): 이미지 너비
+        H (int): 이미지 높이
+        focal_length (float): 초점거리 (기본값: FOCAL_LENGTH)
+    
+    Returns:
+        np.array: 3x3 카메라 행렬 K
+    """
+    cx = W / 2.0  # 이미지 중심 X
+    cy = H / 2.0  # 이미지 중심 Y
+    return np.array([
+        [focal_length, 0, cx],
+        [0, focal_length, cy],
+        [0, 0, 1]
+    ], dtype=np.float32)
+
+
+def back_project_points(depth_map, mask, K):
+    """
+    Depth Map과 Segmentation Mask를 사용하여 3D 포인트 클라우드를 생성합니다.
+    
+    Args:
+        depth_map (numpy.ndarray): Depth 맵 (H, W)
+        mask (numpy.ndarray): 세그먼트 마스크 (boolean, H, W)
+        K (numpy.ndarray): 카메라 행렬 (3x3)
+    
+    Returns:
+        numpy.ndarray: 3D 포인트 클라우드 (N, 3) 또는 None
+    """
+    H, W = depth_map.shape  # 이미지 크기
+    
+    # 마스크 내의 픽셀 좌표 (u, v)
+    v_indices, u_indices = np.where(mask)  # v = y, u = x
+    
+    if len(v_indices) == 0:  # 마스크가 비어있으면
+        return None
+    
+    # 해당 픽셀들의 깊이 값 (Z)
+    Z = depth_map[v_indices, u_indices]  # Depth 값
+    
+    # 픽셀 좌표를 동차 좌표로 변환 (u, v, 1)
+    uv_ones = np.stack([u_indices, v_indices, np.ones_like(u_indices)], axis=1).T  # (3, N)
+    
+    # (u, v, 1) = K * [X/Z, Y/Z, 1]
+    # 따라서: Z * K_inv * (u, v, 1) = (X, Y, Z)
+    K_inv = np.linalg.inv(K)  # 카메라 행렬의 역행렬
+    
+    # 3D 공간 상의 (X/Z, Y/Z, 1) 좌표 계산
+    XYZ_norm = K_inv @ uv_ones  # (3, N)
+    
+    # 실제 3D 좌표 (X, Y, Z) 계산
+    X = XYZ_norm[0, :] * Z  # X = (X/Z) * Z
+    Y = XYZ_norm[1, :] * Z  # Y = (Y/Z) * Z
+    
+    # 3D 포인트 클라우드 (N, 3) 형태로 반환
+    points_3d = np.stack([X, Y, Z], axis=1)  # (N, 3)
+    
+    # 깊이가 너무 멀거나 0인 포인트는 제거 (노이즈 필터링)
+    valid_mask = (points_3d[:, 2] > 0.01) & (points_3d[:, 2] < 100.0)  # 유효한 depth 범위
+    valid_points = points_3d[valid_mask]  # 유효한 점만
+    
+    if len(valid_points) < 10:  # 점이 너무 적으면
+        return None
+    
+    return valid_points
+
+
+def compute_pca_orientation(points_3d):
+    """
+    3D 포인트 클라우드에 PCA를 적용하여 객체의 중심, 방향, 크기를 추정합니다.
+    
+    Args:
+        points_3d (numpy.ndarray): 3D 포인트 클라우드 (N, 3)
+    
+    Returns:
+        tuple: (centroid, rotation_matrix, size_factors) 또는 (None, None, None)
+            - centroid: 중심점 (3,)
+            - rotation_matrix: 회전 행렬 (3x3)
+            - size_factors: 크기 벡터 (3,)
+    """
+    if points_3d is None or points_3d.shape[0] < 10:  # 점이 너무 적으면
+        return None, None, None
+    
+    # 1. 중심점 계산 (Centroid)
+    centroid = np.mean(points_3d, axis=0)  # (3,)
+    
+    # 2. 공분산 행렬 계산
+    centered_points = points_3d - centroid  # 중심화
+    cov_matrix = np.cov(centered_points, rowvar=False)  # 공분산 행렬 (3x3)
+    
+    # 3. 고유값(Eigenvalues)과 고유벡터(Eigenvectors) 계산
+    # 고유벡터는 객체의 주축(방향)을 나타냄
+    # 고유값은 각 축을 따라 분산된 정도, 즉 크기에 비례함
+    eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)  # 고유값 분해
+    
+    # 고유값에 따라 정렬 (가장 큰 고유값 = 주 방향)
+    sorted_indices = np.argsort(eigenvalues)[::-1]  # 내림차순 정렬
+    eigenvalues = eigenvalues[sorted_indices]  # 정렬된 고유값
+    rotation_matrix = eigenvectors[:, sorted_indices]  # 정렬된 고유벡터 (회전 행렬)
+    
+    # 4. 크기 추정 (고유값의 제곱근에 비례)
+    # 3D 바운딩 박스의 절반 크기 (반경)
+    size_factors = 2.0 * np.sqrt(eigenvalues)  # 크기 벡터 (3,)
+    
+    # 최소 크기 보장 (너무 작아지면 메쉬가 사라짐)
+    size_factors = np.maximum(size_factors, 0.1)
+    
+    return centroid, rotation_matrix, size_factors
+
+
+def project_3d_to_2d(points_3d, K, R=None, T=None):
+    """
+    3D 점들을 2D 이미지 평면에 투영합니다.
+    
+    Args:
+        points_3d (numpy.ndarray): 3D 점들 (N, 3)
+        K (numpy.ndarray): 카메라 행렬 (3x3)
+        R (numpy.ndarray, optional): 회전 행렬 (3x3), None이면 변환 없음
+        T (numpy.ndarray, optional): 위치 벡터 (3,), None이면 변환 없음
+    
+    Returns:
+        numpy.ndarray: 2D 픽셀 좌표 (N, 2)
+        numpy.ndarray: Depth 값 (N,)
+    """
+    if R is not None and T is not None:  # 변환이 있으면
+        # 3D 변환: P_world = R * P_local + T
+        points_3d = (R @ points_3d.T).T + T  # (N, 3)
+    
+    # 카메라 좌표계로 변환: P_cam = K * P_world
+    points_cam = (K @ points_3d.T).T  # (N, 3)
+    
+    # Perspective Division: (x, y, z) -> (x/z, y/z)
+    points_2d = points_cam[:, :2] / points_cam[:, 2:3]  # (N, 2)
+    depths = points_cam[:, 2]  # Depth 값 (N,)
+    
+    return points_2d.astype(np.int32), depths
+
+
+# ============================================================================
+# Primitive 타입 예측 함수
+# ============================================================================
+
+def predict_primitive_type(class_name):
+    """
+    클래스 이름을 기반으로 Primitive 타입을 예측합니다 (복합 구조 포함).
+    
+    Args:
+        class_name (str): 클래스 이름 (예: "bed", "table", "person")
+    
+    Returns:
+        dict: {
+            'type': 'single' | 'composite',
+            'primitives': [
+                {'type': 'cube', 'position': 'main'},
+                {'type': 'plane', 'position': 'back'}  # 침대 헤드 등
+            ]
+        }
+    """
+    cn = class_name.lower().split(';')[0]  # 세미콜론으로 분리된 첫 번째만 사용
+    
+    # 복합 구조 (Composite)
+    if 'bed' in cn:
+        return {
+            'type': 'composite',
+            'primitives': [
+                {'type': 'cube', 'position': 'main'},      # 침대 본체
+                {'type': 'plane', 'position': 'back'}      # 침대 헤드
+            ]
+        }
+    
+    elif any(x in cn for x in ['chair', 'stool']):
+        return {
+            'type': 'composite',
+            'primitives': [
+                {'type': 'cube', 'position': 'top'},       # 의자 상판
+                {'type': 'cube', 'position': 'legs'}       # 의자 다리
+            ]
+        }
+    
+    elif 'table' in cn or 'desk' in cn:
+        return {
+            'type': 'composite',
+            'primitives': [
+                {'type': 'cube', 'position': 'top'},       # 테이블 상판
+                {'type': 'cube', 'position': 'legs'}       # 테이블 다리
+            ]
+        }
+    
+    # 단일 구조 (Single)
+    elif any(x in cn for x in ['person', 'pole', 'tree', 'lamp', 'column']):
+        return {
+            'type': 'single',
+            'primitives': [{'type': 'cylinder', 'position': 'main'}]
+        }
+    
+    elif any(x in cn for x in ['floor', 'ceiling', 'road', 'sidewalk', 'ground', 'earth', 'grass']):
+        return {
+            'type': 'single',
+            'primitives': [{'type': 'plane', 'position': 'main'}]
+        }
+    
+    elif 'wall' in cn:
+        return {
+            'type': 'single',
+            'primitives': [{'type': 'plane', 'position': 'main'}]
+        }
+    
+    # 기본값: 큐브
+    else:
+        return {
+            'type': 'single',
+            'primitives': [{'type': 'cube', 'position': 'main'}]
+        }
+
+
+# ============================================================================
+# PCA 기반 Primitive 추정 및 대칭성 보정
+# ============================================================================
+
+def enforce_symmetry(scale, primitive_type):
+    """
+    Primitive 타입에 따라 대칭성을 강제합니다.
+    
+    Args:
+        scale (numpy.ndarray): 크기 벡터 (3,)
+        primitive_type (str): 'cube' | 'cylinder' | 'plane'
+    
+    Returns:
+        numpy.ndarray: 대칭성 보정된 크기 벡터 (3,)
+    """
+    if primitive_type == 'cube':
+        # 정육면체: 모든 축이 같게
+        avg_scale = np.mean(scale)
+        return np.array([avg_scale, avg_scale, avg_scale])
+    
+    elif primitive_type == 'cylinder':
+        # 원기둥: x, z 축이 같게 (반지름), y 축은 높이
+        radius = (scale[0] + scale[2]) / 2.0
+        return np.array([radius, scale[1], radius])
+    
+    elif primitive_type == 'plane':
+        # 평면: 대칭성 보정 불필요 (이미 평면)
+        return scale
+    
+    # 기본값: 그대로 반환
+    return scale
+
+
+def clip_to_segment(scale, mask, depth_map, K, center, rotation, primitive_type):
+    """
+    대칭성 보정된 scale이 세그먼트를 넘지 않도록 제한합니다.
+    
+    Args:
+        scale (numpy.ndarray): 크기 벡터 (3,)
+        mask (numpy.ndarray): 세그먼트 마스크 (boolean, H, W)
+        depth_map (numpy.ndarray): Depth 맵 (H, W)
+        K (numpy.ndarray): 카메라 행렬 (3x3)
+        center (numpy.ndarray): 중심점 (3,)
+        rotation (numpy.ndarray): 회전 행렬 (3x3)
+        primitive_type (str): Primitive 타입
+    
+    Returns:
+        numpy.ndarray: 제한된 크기 벡터 (3,)
+    """
+    # Unit Primitive 가져오기
+    if primitive_type not in UNIT_PRIMITIVES:
+        return scale
+    
+    unit_vertices = UNIT_PRIMITIVES[primitive_type]['vertices']  # (N, 3)
+    
+    # Unit Primitive를 변환하여 2D로 투영
+    # P_world = R * (S * P_unit) + T
+    scaled_vertices = unit_vertices * scale  # 크기 적용
+    transformed_vertices = (rotation @ scaled_vertices.T).T + center  # 회전 + 이동
+    
+    # 2D로 투영
+    points_2d, depths = project_3d_to_2d(transformed_vertices, K)  # (N, 2), (N,)
+    
+    # 세그먼트 mask와 교차 비율 계산
+    H, W = mask.shape
+    valid_count = 0
+    total_count = 0
+    
+    for point_2d, depth in zip(points_2d, depths):
+        x, y = int(point_2d[0]), int(point_2d[1])
+        if 0 <= y < H and 0 <= x < W:  # 이미지 범위 내
+            total_count += 1
+            if mask[y, x]:  # 세그먼트 내부
+                valid_count += 1
+    
+    # 교차 비율이 낮으면 scale을 줄임
+    if total_count > 0:
+        overlap_ratio = valid_count / total_count
+        if overlap_ratio < 0.8:  # 80% 미만이면
+            # scale을 줄여서 세그먼트 내에 맞춤
+            scale_factor = overlap_ratio * 1.2  # 약간 여유를 두고
+            scale = scale * scale_factor
+    
+    return scale
+
+
+def estimate_primitive_with_pca(mask, depth_map, K, primitive_type, max_points=1000):
+    """
+    PCA를 사용하여 Primitive의 위치, 회전, 크기를 추정합니다.
+    
+    Args:
+        mask (numpy.ndarray): 세그먼트 마스크 (boolean, H, W)
+        depth_map (numpy.ndarray): Depth 맵 (H, W)
+        K (numpy.ndarray): 카메라 행렬 (3x3)
+        primitive_type (str): 'cube' | 'cylinder' | 'plane'
+        max_points (int): PCA 계산용 최대 점 개수
+    
+    Returns:
+        dict: {
+            'center': np.array (3,),
+            'rotation': np.array (3x3),
+            'scale': np.array (3,),
+            'success': bool
+        } 또는 None
+    """
+    # 1. Back-projection → 3D Point Cloud
+    points_3d = back_project_points(depth_map, mask, K)
+    
+    if points_3d is None:  # Point Cloud 생성 실패
+        return None
+    
+    # 2. 샘플링 (너무 많으면 일부만 사용)
+    if len(points_3d) > max_points:
+        indices = np.random.choice(len(points_3d), max_points, replace=False)
+        points_3d = points_3d[indices]
+    
+    # 3. PCA로 기본 추정
+    center, rotation, scale = compute_pca_orientation(points_3d)
+    
+    if center is None:  # PCA 실패
+        return None
+    
+    # 4. 대칭성 보정
+    scale = enforce_symmetry(scale, primitive_type)
+    
+    # 5. 세그먼트 범위 내로 제한
+    scale = clip_to_segment(scale, mask, depth_map, K, center, rotation, primitive_type)
+    
+    return {
+        'center': center,
+        'rotation': rotation,
+        'scale': scale,
+        'success': True
+    }
+
+
+# ============================================================================
+# Face 생성 함수
+# ============================================================================
+
+def create_face_mask(face_vertices_2d, image_shape, original_mask):
+    """
+    Face의 2D 꼭지점들로부터 Face mask를 생성합니다.
+    
+    Args:
+        face_vertices_2d (numpy.ndarray): Face의 2D 꼭지점들 (N, 2)
+        image_shape (tuple): 이미지 크기 (H, W)
+        original_mask (numpy.ndarray): 원본 세그먼트 마스크 (boolean, H, W)
+    
+    Returns:
+        numpy.ndarray: Face mask (boolean, H, W)
+    """
+    H, W = image_shape
+    face_mask = np.zeros((H, W), dtype=np.uint8)  # Face mask 초기화
+    
+    # 꼭지점들을 정수로 변환
+    pts = face_vertices_2d.astype(np.int32).reshape(-1, 1, 2)  # (N, 1, 2)
+    
+    # cv2.fillPoly()로 Face 영역 채우기
+    cv2.fillPoly(face_mask, [pts], 255)  # Face 영역을 255로 채움
+    
+    # 원본 mask와 교차 (AND 연산)
+    face_mask = (face_mask > 0) & original_mask  # boolean mask
+    
+    # 작은 노이즈 제거 (morphology)
+    if np.any(face_mask):
+        kernel = np.ones((3, 3), np.uint8)
+        face_mask = cv2.morphologyEx(face_mask.astype(np.uint8), 
+                                     cv2.MORPH_OPEN, kernel).astype(bool)
+    
+    return face_mask
+
+
+def create_faces_from_primitive(primitive_result, primitive_type, mask, K):
+    """
+    Primitive 추정 결과로부터 Face mask들을 생성합니다.
+    
+    Args:
+        primitive_result (dict): {
+            'center': np.array (3,),
+            'rotation': np.array (3x3),
+            'scale': np.array (3,),
+            'success': bool
+        }
+        primitive_type (str): 'cube' | 'cylinder' | 'plane'
+        mask (numpy.ndarray): 원본 세그먼트 마스크 (boolean, H, W)
+        K (numpy.ndarray): 카메라 행렬 (3x3)
+    
+    Returns:
+        dict: {'face_name': face_mask, ...} 또는 None
+    """
+    if primitive_result is None or not primitive_result.get('success', False):
+        return None
+    
+    if primitive_type not in UNIT_PRIMITIVES:
+        return None
+    
+    center = primitive_result['center']
+    rotation = primitive_result['rotation']
+    scale = primitive_result['scale']
+    
+    # Unit Primitive 가져오기
+    unit_primitive = UNIT_PRIMITIVES[primitive_type]
+    unit_vertices = unit_primitive['vertices']  # (N, 3)
+    face_definitions = unit_primitive['faces']  # {'face_name': [vertex_indices]}
+    
+    H, W = mask.shape
+    faces = {}  # Face mask 딕셔너리
+    
+    # 각 Face에 대해
+    for face_name, vertex_indices in face_definitions.items():
+        # Face의 꼭지점들 추출
+        face_vertices_unit = unit_vertices[vertex_indices]  # (M, 3)
+        
+        # Unit Primitive를 변환: P_world = R * (S * P_unit) + T
+        scaled_vertices = face_vertices_unit * scale  # 크기 적용
+        transformed_vertices = (rotation @ scaled_vertices.T).T + center  # 회전 + 이동
+        
+        # 2D로 투영
+        face_vertices_2d, depths = project_3d_to_2d(transformed_vertices, K)  # (M, 2), (M,)
+        
+        # 카메라 뒤에 있는 점들은 제외 (z < 0)
+        valid_mask = depths > 0.1
+        if not np.any(valid_mask):  # 유효한 점이 없으면
+            continue
+        
+        face_vertices_2d = face_vertices_2d[valid_mask]
+        
+        # Face mask 생성
+        face_mask = create_face_mask(face_vertices_2d, (H, W), mask)
+        
+        # Face mask가 충분히 크면 추가 (최소 10픽셀)
+        if np.sum(face_mask) >= 10:
+            faces[face_name] = face_mask
+    
+    return faces if len(faces) > 0 else None
+
+
+# ============================================================================
+# Face Instance 생성 함수
+# ============================================================================
+
+def create_face_instances(seg_map, segments_info, depth_map, K, id2label):
+    """
+    모든 객체의 Face를 Instance Segmentation으로 추가합니다.
+    
+    Args:
+        seg_map (numpy.ndarray): 원본 segmentation map (H, W)
+        segments_info (list): 원본 segments 정보
+        depth_map (numpy.ndarray): Depth 맵 (H, W)
+        K (numpy.ndarray): 카메라 행렬 (3x3)
+        id2label (dict): label_id → class_name 매핑
+    
+    Returns:
+        tuple: (
+            extended_seg_map,      # Face instance가 추가된 seg_map
+            extended_segments_info, # Face instance 정보가 추가된 segments_info
+            face_instance_count     # 생성된 face instance 개수
+        )
+    """
+    extended_seg_map = seg_map.copy()  # 원본 보존
+    extended_segments_info = segments_info.copy()
+    
+    # 새 ID 시작점 (원본 ID의 최대값 + 1)
+    max_original_id = int(seg_map.max()) if seg_map.size > 0 else 0
+    next_face_id = max_original_id + 1
+    face_instance_count = 0
+    
+    H, W = seg_map.shape
+    
+    # 각 원본 segment에 대해
+    for seg_info in segments_info:
+        original_id = seg_info['id']
+        label_id = seg_info.get('label_id', 0)
+        class_name = id2label.get(label_id, 'unknown').split(';')[0]  # 세미콜론으로 분리
+        
+        # 세그먼트 mask 추출
+        segment_mask = (seg_map == original_id)  # boolean mask
+        
+        if not np.any(segment_mask):  # 마스크가 비어있으면
+            continue
+        
+        # Primitive 타입 예측
+        primitive_type_info = predict_primitive_type(class_name)
+        
+        # 단일 구조만 처리 (복합 구조는 나중에)
+        if primitive_type_info['type'] != 'single':
+            continue  # 복합 구조는 나중에 구현
+        
+        primitive_type = primitive_type_info['primitives'][0]['type']
+        
+        # PCA 기반 Primitive 추정
+        primitive_result = estimate_primitive_with_pca(
+            segment_mask, depth_map, K, primitive_type
+        )
+        
+        if primitive_result is None:  # 추정 실패
+            continue
+        
+        # Face 생성
+        faces = create_faces_from_primitive(
+            primitive_result, primitive_type, segment_mask, K
+        )
+        
+        if faces is None:  # Face 생성 실패
+            continue
+        
+        # 각 Face를 Instance로 추가
+        for face_index, (face_name, face_mask) in enumerate(faces.items()):
+            # 새 ID 생성: original_id * 100 + face_index
+            face_id = original_id * 100 + face_index
+            
+            # seg_map에 Face mask 추가
+            extended_seg_map[face_mask] = face_id
+            
+            # segments_info에 Face 정보 추가
+            face_info = {
+                'id': face_id,
+                'original_id': original_id,
+                'face_index': face_index,
+                'face_name': face_name,
+                'label_id': label_id,
+                'score': seg_info.get('score', 0.0),
+                'is_face': True,
+                'primitive_type': primitive_type
+            }
+            extended_segments_info.append(face_info)
+            face_instance_count += 1
+    
+    return extended_seg_map, extended_segments_info, face_instance_count
+
+
+# ============================================================================
+# 유틸리티 함수
+# ============================================================================
+
+def get_color(idx):
+    """
+    인덱스 기반으로 고유한 색상을 생성합니다.
+    
+    HSV 색상 공간을 사용하여 각 인덱스마다 서로 다른 색상을 생성하며,
+    137.5도 간격으로 색상을 배치하여 시각적으로 구분하기 쉽게 만듭니다.
+    
+    Args:
+        idx (int): 색상을 생성할 인덱스
+    
+    Returns:
+        tuple: (B, G, R) 형식의 정수 튜플 (OpenCV BGR 형식)
+    """
+    hue = int((idx * 137.5) % 180)  # HSV 색상 공간에서 색상값 계산
+    hsv = np.uint8([[[hue, 255, 255]]])  # HSV 배열 생성
+    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0][0]  # HSV를 BGR로 변환
+    return tuple(map(int, bgr))  # 정수 튜플로 반환
+
+
+def get_shape_type_from_class(class_name):
+    """
+    클래스 이름을 기반으로 3D 형태를 추정합니다.
+    
+    Args:
+        class_name (str): 클래스 이름 (예: "bed", "wall", "floor")
+    
+    Returns:
+        str: 형태 타입 (상세한 타입 반환)
+    """
+    cn = class_name.lower()  # 소문자로 변환
+    
+    # Outline Only (외곽선만)
+    if any(x in cn for x in ["window", "paint", "curtain", "mirror", "cushion", "palm", "sky", "poster", "picture"]): 
+        return "outline_only"
+    
+    # Horizontal Plane (수평면)
+    if any(x in cn for x in ["floor", "flooring", "ground", "road", "sidewalk", "runway", "ceiling", "carpet", "rug"]): 
+        return "horizontal_plane"
+    
+    # Vertical Plane (수직면)
+    if "wall" in cn: 
+        return "wall"
+    
+    # Topographic (산, 언덕 등)
+    if any(x in cn for x in ["mountain", "earth", "hill", "rock"]): 
+        return "topographic"
+    
+    # Volumetric Cube (Perspective 적용 대상)
+    if any(x in cn for x in ["bed", "table", "desk", "sofa", "couch", "cabinet", "box", "chest", "building", "house", "bridge", "chair", "bench", "seat", "stool", "door", "closet"]): 
+        return "cube_perspective"
+    
+    # Cylinder (사람, 기둥 등)
+    if any(x in cn for x in ["person", "people", "pedestrian"]): 
+        return "person"
+    if any(x in cn for x in ["lamp", "light", "pole", "column", "tree", "pillar"]): 
+        return "cylinder_symmetric"
+    
+    return "outline_only"  # 기본값
+
+
+def calculate_segment_depth(seg_map, segment_id, depth_map):
+    """
+    특정 세그먼트의 평균 depth 값을 계산합니다.
+    
+    Args:
+        seg_map (numpy.ndarray): 세그멘테이션 맵
+        segment_id (int): 세그먼트 ID
+        depth_map (numpy.ndarray): Depth 맵 (이미지와 동일한 크기)
+    
+    Returns:
+        float: 세그먼트 영역의 평균 depth 값 (상대적 거리)
+    """
+    mask = (seg_map == segment_id)  # 세그먼트 마스크 생성
+    if not np.any(mask):  # 마스크가 비어있으면
+        return 0.0
+    segment_depths = depth_map[mask]  # 세그먼트 영역의 depth 값들
+    return float(np.mean(segment_depths))  # 평균 depth 반환
+
+
+def calculate_segment_depth_range(seg_map, segment_id, depth_map):
+    """
+    특정 세그먼트의 depth 범위를 계산합니다.
+    
+    Args:
+        seg_map (numpy.ndarray): 세그멘테이션 맵
+        segment_id (int): 세그먼트 ID
+        depth_map (numpy.ndarray): Depth 맵 (이미지와 동일한 크기)
+    
+    Returns:
+        tuple: (min_depth, max_depth, avg_depth)
+    """
+    mask = (seg_map == segment_id)  # 세그먼트 마스크 생성
+    if not np.any(mask):  # 마스크가 비어있으면
+        return 0.0, 0.0, 0.0
+    segment_depths = depth_map[mask]  # 세그먼트 영역의 depth 값들
+    return float(np.min(segment_depths)), float(np.max(segment_depths)), float(np.mean(segment_depths))  # min, max, avg 반환
+
+
+def correct_depth_with_vanishing_point(depth_map, vanishing_point, weight=0.3):
+    """
+    소실점을 이용하여 depth 값을 보정합니다.
+    
+    원리: 소실점 방향으로 멀어질수록 depth가 증가해야 함
+    - 소실점에서 멀리 떨어진 픽셀은 depth 값 증가
+    - 소실점에 가까운 픽셀은 depth 값 감소
+    
+    Args:
+        depth_map (numpy.ndarray): 원본 depth 맵
+        vanishing_point (tuple): 소실점 좌표 (vx, vy)
+        weight (float): 보정 강도 (0.0~1.0, 기본값 0.3)
+    
+    Returns:
+        numpy.ndarray: 보정된 depth 맵
+    """
+    if vanishing_point is None:  # 소실점이 없으면
+        return depth_map  # 원본 반환
+    
+    h, w = depth_map.shape[:2]  # 이미지 크기
+    vx, vy = vanishing_point  # 소실점 좌표
+    
+    # 소실점에서 각 픽셀까지의 거리 계산
+    y_coords, x_coords = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')  # 좌표 그리드 생성
+    distances = np.sqrt((x_coords - vx)**2 + (y_coords - vy)**2)  # 소실점과의 거리
+    
+    # 거리를 정규화 (0~1 범위)
+    max_distance = np.sqrt(w**2 + h**2)  # 최대 거리 (대각선)
+    normalized_distances = distances / max_distance  # 정규화된 거리
+    
+    # Depth 범위 계산
+    depth_min = depth_map.min()  # 최소 depth
+    depth_max = depth_map.max()  # 최대 depth
+    depth_range = depth_max - depth_min  # Depth 범위
+    
+    if depth_range == 0:  # 범위가 없으면
+        return depth_map  # 원본 반환
+    
+    # 소실점 기반 depth 보정
+    # pipeline("depth-estimation"): 큰 값 = 가까움, 작은 값 = 먼 것
+    # 소실점은 렌즈 쪽(화면 가운데 뒤쪽)에 있음
+    # 소실점 방향으로 갈수록 더 멀어짐 (소실점에 가까울수록 더 먼 것)
+    # 따라서 소실점에 가까울수록 depth 값을 감소시켜야 함 (작은 값 = 먼 것)
+    # 소실점에서 멀수록 depth 값을 증가시켜야 함 (큰 값 = 가까움)
+    # normalized_distances: 0(소실점) ~ 1(가장 먼 곳)
+    # 보정: 소실점에 가까울수록 depth 감소, 멀수록 depth 증가
+    # 소실점에 가까울수록 (normalized_distances가 작을수록) depth 감소
+    vp_correction = -normalized_distances * depth_range * weight  # 보정값 (소실점 가까이 = depth 감소)
+    
+    # 원본 depth에 보정 적용
+    corrected_depth = depth_map + vp_correction  # 보정된 depth
+    
+    # 범위 제한 (원본 범위 내로)
+    corrected_depth = np.clip(corrected_depth, depth_min, depth_max)  # 범위 제한
+    
+    return corrected_depth  # 보정된 depth 반환
+
+
+def detect_depth_edges_in_segment(segment_mask, depth_map, threshold_ratio=0.15):
+    """
+    세그먼트 내부의 depth 변화가 큰 곳(edge)을 감지합니다.
+    
+    Args:
+        segment_mask (numpy.ndarray): 세그먼트 마스크 (boolean)
+        depth_map (numpy.ndarray): Depth 맵
+        threshold_ratio (float): Edge 감지 임계값 비율 (depth 범위의 일정 비율)
+    
+    Returns:
+        tuple: (horizontal_edges, vertical_edges) - 수평/수직 edge 마스크
+    """
+    # 세그먼트 영역의 depth만 추출
+    segment_depth = depth_map.copy()  # Depth 맵 복사
+    segment_depth[~segment_mask] = 0  # 세그먼트 외부는 0으로 설정
+    
+    # Depth 범위 계산
+    valid_depths = depth_map[segment_mask]  # 유효한 depth 값들
+    if len(valid_depths) == 0:  # 유효한 depth가 없으면
+        return np.zeros_like(segment_mask, dtype=bool), np.zeros_like(segment_mask, dtype=bool)  # 빈 마스크 반환
+    
+    depth_range = valid_depths.max() - valid_depths.min()  # Depth 범위
+    threshold = depth_range * threshold_ratio  # Edge 감지 임계값
+    
+    # Sobel 필터로 gradient 계산
+    sobel_x = cv2.Sobel(segment_depth, cv2.CV_64F, 1, 0, ksize=3)  # 수평 방향 gradient
+    sobel_y = cv2.Sobel(segment_depth, cv2.CV_64F, 0, 1, ksize=3)  # 수직 방향 gradient
+    
+    # 절댓값으로 변환
+    sobel_x = np.abs(sobel_x)  # 절댓값
+    sobel_y = np.abs(sobel_y)  # 절댓값
+    
+    # 임계값 이상인 곳을 edge로 감지
+    horizontal_edges = (sobel_x > threshold) & segment_mask  # 수평 edge (수직 선)
+    vertical_edges = (sobel_y > threshold) & segment_mask  # 수직 edge (수평 선)
+    
+    return horizontal_edges, vertical_edges
+
+
+def draw_line_in_mask(img, pt1, pt2, mask, color, thickness=2):
+    """
+    마스크 내부에만 선을 그립니다.
+    
+    Args:
+        img (numpy.ndarray): 이미지
+        pt1 (tuple): 시작점 (x, y)
+        pt2 (tuple): 끝점 (x, y)
+        mask (numpy.ndarray): 마스크 (boolean)
+        color (tuple): 색상
+        thickness (int): 선 두께
+    """
+    # 선을 따라 점들을 생성하고 마스크 내부인지 확인
+    x1, y1 = pt1  # 시작점
+    x2, y2 = pt2  # 끝점
+    
+    # Bresenham 알고리즘으로 선을 따라 점 생성
+    dx = abs(x2 - x1)  # X 차이
+    dy = abs(y2 - y1)  # Y 차이
+    sx = 1 if x1 < x2 else -1  # X 방향
+    sy = 1 if y1 < y2 else -1  # Y 방향
+    err = dx - dy  # 오차
+    
+    x, y = x1, y1  # 현재 위치
+    points = []  # 마스크 내부 점 리스트
+    
+    while True:  # 선을 따라 이동
+        if 0 <= y < mask.shape[0] and 0 <= x < mask.shape[1]:  # 범위 내이면
+            if mask[y, x]:  # 마스크 내부이면
+                points.append((x, y))  # 점 추가
+            else:  # 마스크 외부이면
+                if len(points) > 1:  # 이전 점들이 있으면
+                    # 이전 점들로 선 그리기
+                    for i in range(len(points) - 1):  # 각 점 쌍에 대해
+                        cv2.line(img, points[i], points[i+1], color, thickness)  # 선 그리기
+                    points = []  # 리스트 초기화
+        
+        if x == x2 and y == y2:  # 끝점에 도달하면
+            break  # 종료
+        
+        e2 = 2 * err  # 오차 2배
+        if e2 > -dy:  # Y 방향 이동
+            err -= dy  # 오차 조정
+            x += sx  # X 이동
+        if e2 < dx:  # X 방향 이동
+            err += dx  # 오차 조정
+            y += sy  # Y 이동
+    
+    # 마지막 점들로 선 그리기
+    if len(points) > 1:  # 점들이 있으면
+        for i in range(len(points) - 1):  # 각 점 쌍에 대해
+            cv2.line(img, points[i], points[i+1], color, thickness)  # 선 그리기
+
+
+def draw_outline_only(img, segment_mask, color, thickness=2):
+    """객체 마스크의 외곽선만 그립니다."""
+    mask_uint8 = (segment_mask.astype(np.uint8) * 255)  # 마스크 변환
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 외곽선 검출
+    cv2.drawContours(img, contours, -1, color, thickness)  # 외곽선 그리기
+
+
+def draw_cube_perspective(img, bbox_2d, depth_map, segment_mask, color, vanishing_point=None, thickness=2, img_bgr_resized=None):
+    """
+    Depth 기반 3D 구조를 그립니다. 소실점을 활용한 퍼스펙티브 면과 이미지/depth edge를 결합합니다.
+    
+    Args:
+        img (numpy.ndarray): 이미지 (BGR 형식)
+        bbox_2d (tuple): 2D 바운딩 박스 (x_min, y_min, x_max, y_max)
+        depth_map (numpy.ndarray): Depth 맵
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        color (tuple): 색상 (B, G, R)
+        vanishing_point (tuple, optional): 소실점 좌표 (vx, vy) - 퍼스펙티브 면 그리기에 사용
+        thickness (int): 선 두께
+        img_bgr_resized (numpy.ndarray, optional): 리사이즈된 원본 이미지 (이미지 edge 검출용)
+    """
+    # 외곽선 그리기
+    mask_uint8 = (segment_mask.astype(np.uint8) * 255)  # 마스크 변환
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 외곽선 검출
+    if len(contours) > 0:  # 외곽선이 있으면
+        largest_contour = max(contours, key=cv2.contourArea)  # 가장 큰 외곽선
+        cv2.drawContours(img, [largest_contour], -1, color, thickness)  # 외곽선 그리기
+    
+    x_min, y_min, x_max, y_max = bbox_2d  # 바운딩 박스
+    h, w = img.shape[:2]  # 이미지 크기
+    
+    # 소실점을 활용한 퍼스펙티브 면 그리기
+    if vanishing_point is not None:
+        vx, vy = vanishing_point  # 소실점 좌표
+        
+        # Depth 정보로 앞면/뒷면 구분
+        valid_depths = depth_map[segment_mask]  # 유효한 depth
+        if len(valid_depths) > 0:  # 유효한 depth가 있으면
+            min_depth = valid_depths.min()  # 최소 depth (먼 곳)
+            max_depth = valid_depths.max()  # 최대 depth (가까운 곳)
+            depth_range = max_depth - min_depth  # Depth 범위
+            
+            # 바운딩 박스의 4개 정점 (앞면)
+            front_corners = [
+                (x_min, y_min),  # 왼쪽 위
+                (x_max, y_min),  # 오른쪽 위
+                (x_max, y_max),  # 오른쪽 아래
+                (x_min, y_max),  # 왼쪽 아래
+            ]
+            
+            # 각 정점의 depth 값 추정 (바운딩 박스 내부의 평균 depth 사용)
+            corner_depths = []  # 각 정점의 depth
+            for cx, cy in front_corners:  # 각 정점에 대해
+                # 정점 주변 영역의 depth 평균
+                search_radius = 5  # 검색 반경
+                y_start = max(0, cy - search_radius)  # Y 시작
+                y_end = min(h, cy + search_radius + 1)  # Y 끝
+                x_start = max(0, cx - search_radius)  # X 시작
+                x_end = min(w, cx + search_radius + 1)  # X 끝
+                
+                region_mask = segment_mask[y_start:y_end, x_start:x_end]  # 영역 마스크
+                region_depth = depth_map[y_start:y_end, x_start:x_end]  # 영역 depth
+                valid_region_depths = region_depth[region_mask]  # 유효한 depth
+                
+                if len(valid_region_depths) > 0:  # 유효한 depth가 있으면
+                    corner_depths.append(np.mean(valid_region_depths))  # 평균 depth
+                else:  # 없으면
+                    corner_depths.append(max_depth)  # 최대 depth 사용 (가까운 것으로 가정)
+            
+            # 뒷면 정점 계산 (소실점 방향으로 이동)
+            # Depth가 작을수록(멀수록) 소실점에 더 가깝게 이동
+            back_corners = []  # 뒷면 정점
+            perspective_scale = 0.3  # 기본 원근 축소 비율
+            
+            for i, (cx, cy) in enumerate(front_corners):  # 각 정점에 대해
+                corner_depth = corner_depths[i]  # 정점의 depth
+                # Depth에 따라 원근 축소 비율 조정 (멀수록 더 축소)
+                if depth_range > 0:  # 범위가 있으면
+                    depth_ratio = (corner_depth - min_depth) / depth_range  # 0(가까움) ~ 1(먼 곳)
+                    scale = perspective_scale + (1.0 - perspective_scale) * depth_ratio  # 0.3 ~ 1.0
+                else:  # 범위가 없으면
+                    scale = perspective_scale  # 기본값
+                
+                # 소실점 방향으로 이동
+                dx = vx - cx  # 소실점까지의 X 거리
+                dy = vy - cy  # 소실점까지의 Y 거리
+                
+                # 뒷면 정점 = 앞면 정점 + (소실점 방향) * (1 - scale)
+                back_x = int(cx + dx * (1 - scale))  # 뒷면 X
+                back_y = int(cy + dy * (1 - scale))  # 뒷면 Y
+                back_corners.append((back_x, back_y))  # 뒷면 정점 추가
+            
+            # 퍼스펙티브 면 그리기 (마스크 내부에만)
+            # 앞면 4개 엣지
+            front_edges = [
+                (front_corners[0], front_corners[1]),  # 위쪽
+                (front_corners[1], front_corners[2]),  # 오른쪽
+                (front_corners[2], front_corners[3]),  # 아래쪽
+                (front_corners[3], front_corners[0]),  # 왼쪽
+            ]
+            
+            # 뒷면 4개 엣지
+            back_edges = [
+                (back_corners[0], back_corners[1]),  # 위쪽
+                (back_corners[1], back_corners[2]),  # 오른쪽
+                (back_corners[2], back_corners[3]),  # 아래쪽
+                (back_corners[3], back_corners[0]),  # 왼쪽
+            ]
+            
+            # 앞면-뒷면 연결선 (4개 중 일부만, 너무 많으면 복잡함)
+            connection_edges = [
+                (front_corners[0], back_corners[0]),  # 왼쪽 위
+                (front_corners[2], back_corners[2]),  # 오른쪽 아래
+            ]
+            
+            # 모든 엣지 그리기
+            all_edges = front_edges + back_edges + connection_edges  # 모든 엣지
+            for pt1, pt2 in all_edges:  # 각 엣지에 대해
+                draw_line_in_mask(img, pt1, pt2, segment_mask, color, thickness)  # 마스크 내부에만 그리기
+    
+    # Depth edge 감지
+    depth_h_edges, depth_v_edges = detect_depth_edges_in_segment(segment_mask, depth_map, threshold_ratio=0.15)  # Depth edge 감지
+    
+    # 이미지 edge와 결합 (이미지가 제공된 경우)
+    if img_bgr_resized is not None:  # 원본 이미지가 있으면
+        img_gray = cv2.cvtColor(img_bgr_resized, cv2.COLOR_BGR2GRAY)  # 그레이스케일 변환
+        img_edges = cv2.Canny(img_gray, 50, 150)  # Canny 엣지 검출
+        img_edges_in_mask = img_edges & (segment_mask.astype(np.uint8) * 255)  # 마스크 내부 엣지만
+        
+        # Depth edge와 이미지 edge 결합 (OR 연산 - 둘 중 하나라도 있으면)
+        # 수평 edge: 수직 gradient가 큰 곳 (수평 선을 그리기 위해)
+        # 수직 edge: 수평 gradient가 큰 곳 (수직 선을 그리기 위해)
+        depth_h_edges = depth_h_edges | (img_edges_in_mask > 0)  # 수평 edge 결합 (OR)
+        depth_v_edges = depth_v_edges | (img_edges_in_mask > 0)  # 수직 edge 결합 (OR)
+    
+    horizontal_edges = depth_h_edges  # 수평 edge
+    vertical_edges = depth_v_edges  # 수직 edge
+    
+    # 수평 선 그리기 (수직 edge를 따라 - 마스크 내부에만)
+    y_coords, x_coords = np.where(vertical_edges)  # 수직 edge 좌표
+    if len(y_coords) > 5:  # 충분한 점이 있으면
+        unique_y = np.unique(y_coords)  # 고유한 y 좌표
+        for y in unique_y[::3]:  # 일부만 선택 (너무 많으면 복잡함)
+            x_points = x_coords[y_coords == y]  # 해당 y의 x 좌표들
+            if len(x_points) > 1:  # 점이 2개 이상이면
+                x_sorted = np.sort(x_points)  # 정렬
+                # 연속된 선분으로 그리기
+                gaps = np.diff(x_sorted)  # 간격 계산
+                gap_threshold = 5  # 간격 임계값
+                
+                start_idx = 0  # 시작 인덱스
+                for i, gap in enumerate(gaps):  # 각 간격에 대해
+                    if gap > gap_threshold:  # 간격이 크면
+                        # 이전까지의 선 그리기
+                        if i > start_idx:  # 선분이 있으면
+                            x_start = x_sorted[start_idx]  # 시작 X
+                            x_end = x_sorted[i]  # 끝 X
+                            if segment_mask[y, x_start] and segment_mask[y, x_end]:  # 둘 다 마스크 내부이면
+                                cv2.line(img, (x_start, y), (x_end, y), color, thickness)  # 선 그리기
+                        start_idx = i + 1  # 다음 시작점
+                # 마지막 선분 그리기
+                if start_idx < len(x_sorted):  # 남은 선분이 있으면
+                    x_start = x_sorted[start_idx]  # 시작 X
+                    x_end = x_sorted[-1]  # 끝 X
+                    if segment_mask[y, x_start] and segment_mask[y, x_end]:  # 둘 다 마스크 내부이면
+                        cv2.line(img, (x_start, y), (x_end, y), color, thickness)  # 선 그리기
+    
+    # 수직 선 그리기 (수평 edge를 따라 - 마스크 내부에만)
+    y_coords, x_coords = np.where(horizontal_edges)  # 수평 edge 좌표
+    if len(y_coords) > 5:  # 충분한 점이 있으면
+        unique_x = np.unique(x_coords)  # 고유한 x 좌표
+        for x in unique_x[::3]:  # 일부만 선택
+            y_points = y_coords[x_coords == x]  # 해당 x의 y 좌표들
+            if len(y_points) > 1:  # 점이 2개 이상이면
+                y_sorted = np.sort(y_points)  # 정렬
+                # 연속된 선분으로 그리기
+                gaps = np.diff(y_sorted)  # 간격 계산
+                gap_threshold = 5  # 간격 임계값
+                
+                start_idx = 0  # 시작 인덱스
+                for i, gap in enumerate(gaps):  # 각 간격에 대해
+                    if gap > gap_threshold:  # 간격이 크면
+                        # 이전까지의 선 그리기
+                        if i > start_idx:  # 선분이 있으면
+                            y_start = y_sorted[start_idx]  # 시작 Y
+                            y_end = y_sorted[i]  # 끝 Y
+                            if segment_mask[y_start, x] and segment_mask[y_end, x]:  # 둘 다 마스크 내부이면
+                                cv2.line(img, (x, y_start), (x, y_end), color, thickness)  # 선 그리기
+                        start_idx = i + 1  # 다음 시작점
+                # 마지막 선분 그리기
+                if start_idx < len(y_sorted):  # 남은 선분이 있으면
+                    y_start = y_sorted[start_idx]  # 시작 Y
+                    y_end = y_sorted[-1]  # 끝 Y
+                    if segment_mask[y_start, x] and segment_mask[y_end, x]:  # 둘 다 마스크 내부이면
+                        cv2.line(img, (x, y_start), (x, y_end), color, thickness)  # 선 그리기
+
+
+def draw_cube_structure(img, bbox_2d, depth_map, segment_mask, color, thickness=2):
+    """
+    큐브 형태의 3D 구조를 그립니다 (마스크 내부에만) - 기본 버전.
+    
+    Args:
+        img (numpy.ndarray): 이미지 (BGR 형식)
+        bbox_2d (tuple): 2D 바운딩 박스 (x_min, y_min, x_max, y_max)
+        depth_map (numpy.ndarray): Depth 맵
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        color (tuple): 색상 (B, G, R)
+        thickness (int): 선 두께
+    """
+    # 외곽선만 그리기
+    draw_outline_only(img, segment_mask, color, thickness)  # 외곽선 그리기
+
+
+def draw_cylinder_structure(img, bbox_2d, depth_map, segment_mask, color, thickness=2):
+    """
+    실린더 형태의 3D 구조를 그립니다 (마스크 내부에만).
+    
+    Args:
+        img (numpy.ndarray): 이미지 (BGR 형식)
+        bbox_2d (tuple): 2D 바운딩 박스 (x_min, y_min, x_max, y_max)
+        depth_map (numpy.ndarray): Depth 맵
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        color (tuple): 색상 (B, G, R)
+        thickness (int): 선 두께
+    """
+    # 마스크의 외곽선 찾기
+    mask_uint8 = (segment_mask.astype(np.uint8) * 255)  # 마스크를 uint8로 변환
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 외곽선 찾기
+    
+    if len(contours) > 0:  # 외곽선이 있으면
+        # 가장 큰 외곽선 사용
+        largest_contour = max(contours, key=cv2.contourArea)  # 가장 큰 외곽선
+        # 외곽선을 따라 선 그리기
+        cv2.drawContours(img, [largest_contour], -1, color, thickness)  # 외곽선 그리기
+        
+        # 실린더 내부의 수직선 그리기 (마스크 내부에만)
+        # Depth edge를 따라 수직선 그리기
+        horizontal_edges, _ = detect_depth_edges_in_segment(segment_mask, depth_map, threshold_ratio=0.15)  # 수평 edge만
+        
+        # 수직선 그리기 (마스크 내부에만)
+        y_coords, x_coords = np.where(horizontal_edges)  # 수평 edge 좌표
+        if len(y_coords) > 5:  # 충분한 점이 있으면
+            unique_x = np.unique(x_coords)  # 고유한 x 좌표
+            for x in unique_x[::5]:  # 일부만 선택
+                y_points = y_coords[x_coords == x]  # 해당 x의 y 좌표들
+                if len(y_points) > 1:  # 점이 2개 이상이면
+                    y_sorted = np.sort(y_points)  # 정렬
+                    # 마스크 내부인지 확인하며 선 그리기
+                    for i in range(len(y_sorted) - 1):  # 각 점 쌍에 대해
+                        if segment_mask[y_sorted[i], x] and segment_mask[y_sorted[i+1], x]:  # 둘 다 마스크 내부이면
+                            cv2.line(img, (x, y_sorted[i]), (x, y_sorted[i+1]), color, thickness)  # 선 그리기
+
+
+def draw_plane_structure(img, bbox_2d, depth_map, segment_mask, color, thickness=2):
+    """
+    평면 형태의 3D 구조를 그립니다 (꺾인 경계를 따라 접힌 종이처럼).
+    
+    Args:
+        img (numpy.ndarray): 이미지 (BGR 형식)
+        bbox_2d (tuple): 2D 바운딩 박스 (x_min, y_min, x_max, y_max)
+        depth_map (numpy.ndarray): Depth 맵
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        color (tuple): 색상 (B, G, R)
+        thickness (int): 선 두께
+    """
+    # 평면의 꺾인 경계(edge)를 찾아서 접힌 종이처럼 표시
+    horizontal_edges, vertical_edges = detect_depth_edges_in_segment(segment_mask, depth_map, threshold_ratio=0.15)  # Edge 감지
+    
+    # 꺾인 경계를 강조하여 그리기 (접힌 종이 효과)
+    # 수평 선 그리기 (수직 edge를 따라 - 종이가 수직으로 접힌 부분)
+    y_coords, x_coords = np.where(vertical_edges)  # 수직 edge 좌표
+    if len(y_coords) > 5:  # 충분한 점이 있으면
+        unique_y = np.unique(y_coords)  # 고유한 y 좌표
+        for y in unique_y:  # 각 y 좌표에 대해
+            x_points = x_coords[y_coords == y]  # 해당 y의 x 좌표들
+            if len(x_points) > 1:  # 점이 2개 이상이면
+                x_sorted = np.sort(x_points)  # 정렬
+                # 연속된 선분으로 그리기
+                gaps = np.diff(x_sorted)  # 간격 계산
+                gap_threshold = 3  # 간격 임계값
+                
+                start_idx = 0  # 시작 인덱스
+                for i, gap in enumerate(gaps):  # 각 간격에 대해
+                    if gap > gap_threshold:  # 간격이 크면
+                        # 이전까지의 선 그리기
+                        if i > start_idx:  # 선분이 있으면
+                            cv2.line(img, (x_sorted[start_idx], y), (x_sorted[i], y), color, thickness)  # 선 그리기
+                        start_idx = i + 1  # 다음 시작점
+                # 마지막 선분 그리기
+                if start_idx < len(x_sorted):  # 남은 선분이 있으면
+                    cv2.line(img, (x_sorted[start_idx], y), (x_sorted[-1], y), color, thickness)  # 선 그리기
+    
+    # 수직 선 그리기 (수평 edge를 따라 - 종이가 수평으로 접힌 부분)
+    y_coords, x_coords = np.where(horizontal_edges)  # 수평 edge 좌표
+    if len(y_coords) > 5:  # 충분한 점이 있으면
+        unique_x = np.unique(x_coords)  # 고유한 x 좌표
+        for x in unique_x:  # 각 x 좌표에 대해
+            y_points = y_coords[x_coords == x]  # 해당 x의 y 좌표들
+            if len(y_points) > 1:  # 점이 2개 이상이면
+                y_sorted = np.sort(y_points)  # 정렬
+                # 연속된 선분으로 그리기
+                gaps = np.diff(y_sorted)  # 간격 계산
+                gap_threshold = 3  # 간격 임계값
+                
+                start_idx = 0  # 시작 인덱스
+                for i, gap in enumerate(gaps):  # 각 간격에 대해
+                    if gap > gap_threshold:  # 간격이 크면
+                        # 이전까지의 선 그리기
+                        if i > start_idx:  # 선분이 있으면
+                            cv2.line(img, (x, y_sorted[start_idx]), (x, y_sorted[i]), color, thickness)  # 선 그리기
+                        start_idx = i + 1  # 다음 시작점
+                # 마지막 선분 그리기
+                if start_idx < len(y_sorted):  # 남은 선분이 있으면
+                    cv2.line(img, (x, y_sorted[start_idx]), (x, y_sorted[-1]), color, thickness)  # 선 그리기
+
+
+def draw_sphere_structure(img, bbox_2d, depth_map, segment_mask, color, thickness=2):
+    """
+    구 형태의 3D 구조를 그립니다.
+    
+    Args:
+        img (numpy.ndarray): 이미지 (BGR 형식)
+        bbox_2d (tuple): 2D 바운딩 박스 (x_min, y_min, x_max, y_max)
+        depth_map (numpy.ndarray): Depth 맵
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        color (tuple): 색상 (B, G, R)
+        thickness (int): 선 두께
+    """
+    x_min, y_min, x_max, y_max = bbox_2d  # 2D 바운딩 박스 좌표
+    
+    # 구의 중심과 반지름
+    center_x = (x_min + x_max) / 2  # 중심 X
+    center_y = (y_min + y_max) / 2  # 중심 Y
+    radius = min((x_max - x_min) / 2, (y_max - y_min) / 2)  # 반지름
+    
+    # 구의 원형 윤곽선 그리기
+    cv2.circle(img, (int(center_x), int(center_y)), int(radius), color, thickness)  # 외곽 원
+    
+    # 수평선과 수직선으로 구 형태 표현
+    cv2.ellipse(img, (int(center_x), int(center_y)), (int(radius), int(radius * 0.5)), 0, 0, 360, color, thickness)  # 수평 타원
+    cv2.ellipse(img, (int(center_x), int(center_y)), (int(radius * 0.5), int(radius)), 0, 0, 360, color, thickness)  # 수직 타원
+
+
+def draw_contour_lines(img, segment_mask, depth_map, color, thickness=1):
+    """
+    Depth map을 이용해 등고선을 그립니다 (mountain, earth 등).
+    
+    Args:
+        img (numpy.ndarray): 이미지
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        depth_map (numpy.ndarray): Depth 맵
+        color (tuple): 색상
+        thickness (int): 선 두께
+    """
+    # Depth 값을 구간으로 나누어 등고선 생성
+    valid_depths = depth_map[segment_mask]  # 유효한 depth 값들
+    if len(valid_depths) == 0:  # 유효한 depth가 없으면
+        return
+    
+    depth_min = valid_depths.min()  # 최소 depth
+    depth_max = valid_depths.max()  # 최대 depth
+    depth_range = depth_max - depth_min  # Depth 범위
+    
+    if depth_range == 0:  # 범위가 없으면
+        return
+    
+    # 등고선 레벨 생성 (5-10개 레벨)
+    num_levels = 8  # 등고선 레벨 개수
+    levels = np.linspace(depth_min, depth_max, num_levels)  # 등고선 레벨
+    
+    for level in levels[1:-1]:  # 첫 번째와 마지막 제외
+        # 해당 depth 레벨의 경계 찾기
+        level_mask = (np.abs(depth_map - level) < depth_range * 0.05) & segment_mask  # 레벨 마스크
+        if np.any(level_mask):  # 마스크가 있으면
+            # 등고선 그리기 (마스크 내부에만)
+            y_coords, x_coords = np.where(level_mask)  # 좌표 추출
+            if len(y_coords) > 10:  # 충분한 점이 있으면
+                # 간단한 등고선 표현 (일부 점만 선택)
+                for i in range(0, len(y_coords), max(1, len(y_coords) // 50)):  # 일부만 선택
+                    y, x = y_coords[i], x_coords[i]  # 좌표
+                    if segment_mask[y, x]:  # 마스크 내부이면
+                        cv2.circle(img, (x, y), 1, color, thickness)  # 작은 점으로 표시
+
+
+def draw_person_structure(img, bbox_2d, segment_mask, color, thickness=2):
+    """사람 객체에 간단한 골격 구조를 그립니다."""
+    x_min, y_min, x_max, y_max = bbox_2d  # 바운딩 박스
+    width = x_max - x_min  # 너비
+    height = y_max - y_min  # 높이
+    
+    draw_outline_only(img, segment_mask, color, thickness)  # 외곽선 그리기
+
+    # 간략화된 인체 비례 사용
+    head_h = int(height * 0.15)  # 머리 높이
+    torso_h = int(height * 0.40)  # 몸통 높이
+    center_x = (x_min + x_max) // 2  # 중심 X
+    
+    y_neck = y_min + head_h  # 목 위치
+    y_waist = y_neck + torso_h  # 허리 위치
+    
+    # 목선
+    draw_line_in_mask(img, (x_min + width//3, y_neck), (x_max - width//3, y_neck), segment_mask, color, 1)  # 목선 그리기
+    # 허리선
+    draw_line_in_mask(img, (x_min, y_waist), (x_max, y_waist), segment_mask, color, 1)  # 허리선 그리기
+    # 다리 (중앙 분할)
+    draw_line_in_mask(img, (center_x, y_waist), (center_x, y_max), segment_mask, color, 1)  # 다리 중앙선 그리기
+    # 팔 (양쪽)
+    arm_offset = width // 4  # 팔 오프셋
+    draw_line_in_mask(img, (x_min + arm_offset, y_neck), (x_min + arm_offset, y_waist), segment_mask, color, 1)  # 왼쪽 팔
+    draw_line_in_mask(img, (x_max - arm_offset, y_neck), (x_max - arm_offset, y_waist), segment_mask, color, 1)  # 오른쪽 팔
+
+
+def draw_cylinder_symmetric(img, bbox_2d, segment_mask, color, thickness=2):
+    """기둥/나무 등 원통형 객체에 중심선과 수평선을 그립니다."""
+    draw_outline_only(img, segment_mask, color, thickness)  # 외곽선 그리기
+    x_min, y_min, x_max, y_max = bbox_2d  # 바운딩 박스
+    center_x = (x_min + x_max) // 2  # 중심 X
+    
+    # 중심 수직선
+    draw_line_in_mask(img, (center_x, y_min), (center_x, y_max), segment_mask, color, 1)  # 중심 수직선 그리기
+    
+    # 수평 분할선
+    steps = 4  # 분할 단계 수
+    step_h = (y_max - y_min) // steps  # 단계 높이
+    for i in range(1, steps):  # 각 단계에 대해
+        y = y_min + step_h * i  # Y 좌표
+        draw_line_in_mask(img, (x_min, y), (x_max, y), segment_mask, color, 1)  # 수평선 그리기
+
+
+def draw_palm_tree_structure(img, bbox_2d, depth_map, segment_mask, color, thickness=2):
+    """
+    야자수 구조를 그립니다 (위에 평면 잎 + 아래 실린더).
+    
+    Args:
+        img (numpy.ndarray): 이미지
+        bbox_2d (tuple): 2D 바운딩 박스
+        depth_map (numpy.ndarray): Depth 맵
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        color (tuple): 색상
+        thickness (int): 선 두께
+    """
+    x_min, y_min, x_max, y_max = bbox_2d  # 바운딩 박스
+    center_x = (x_min + x_max) / 2  # 중심 X
+    height = y_max - y_min  # 높이
+    
+    # 잎 부분 (상단 40%): 평면
+    leaf_bottom = int(y_min + height * 0.4)  # 잎 하단
+    leaf_top = int(y_min)  # 잎 상단
+    
+    # 잎의 외곽선 그리기 (마스크 내부에만)
+    mask_uint8 = (segment_mask.astype(np.uint8) * 255)  # 마스크 변환
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 외곽선
+    if len(contours) > 0:  # 외곽선이 있으면
+        largest_contour = max(contours, key=cv2.contourArea)  # 가장 큰 외곽선
+        # 잎 부분만 필터링
+        leaf_contour = []  # 잎 외곽선
+        for pt in largest_contour:  # 각 점에 대해
+            x, y = pt[0][0], pt[0][1]  # 좌표
+            if leaf_top <= y <= leaf_bottom and segment_mask[y, x]:  # 잎 영역이고 마스크 내부이면
+                leaf_contour.append([[x, y]])  # 추가
+        if len(leaf_contour) > 0:  # 점이 있으면
+            leaf_contour = np.array(leaf_contour, dtype=np.int32)  # 배열 변환
+            cv2.drawContours(img, [leaf_contour], -1, color, thickness)  # 외곽선 그리기
+    
+    # 중심선 그리기 (마스크 내부에만)
+    center_y_start = leaf_bottom  # 시작 Y
+    center_y_end = y_max  # 끝 Y
+    for y in range(center_y_start, center_y_end, 2):  # 2픽셀 간격
+        x = int(center_x)  # 중심 X
+        if 0 <= y < segment_mask.shape[0] and 0 <= x < segment_mask.shape[1]:  # 범위 내이면
+            if segment_mask[y, x]:  # 마스크 내부이면
+                cv2.circle(img, (x, y), 1, color, thickness)  # 점 그리기
+    
+    # 줄기 부분 (하단 60%): 실린더
+    trunk_top = leaf_bottom  # 줄기 상단
+    trunk_bottom = y_max  # 줄기 하단
+    trunk_radius = min((x_max - x_min) / 2 * 0.2, (trunk_bottom - trunk_top) / 2)  # 줄기 반지름
+    
+    # 줄기 외곽선 (마스크 내부에만)
+    trunk_contour = []  # 줄기 외곽선
+    for pt in largest_contour:  # 각 점에 대해
+        x, y = pt[0][0], pt[0][1]  # 좌표
+        if trunk_top <= y <= trunk_bottom and segment_mask[y, x]:  # 줄기 영역이고 마스크 내부이면
+            trunk_contour.append([[x, y]])  # 추가
+    if len(trunk_contour) > 0:  # 점이 있으면
+        trunk_contour = np.array(trunk_contour, dtype=np.int32)  # 배열 변환
+        cv2.drawContours(img, [trunk_contour], -1, color, thickness)  # 외곽선 그리기
+
+
+def draw_horizontal_plane(img, segment_mask, color, thickness=1):
+    """
+    수평 평면을 그립니다 (window, floor, ceiling - 외곽선만).
+    
+    Args:
+        img (numpy.ndarray): 이미지
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        color (tuple): 색상
+        thickness (int): 선 두께
+    """
+    # 외곽선만 그리기
+    mask_uint8 = (segment_mask.astype(np.uint8) * 255)  # 마스크 변환
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 외곽선
+    if len(contours) > 0:  # 외곽선이 있으면
+        largest_contour = max(contours, key=cv2.contourArea)  # 가장 큰 외곽선
+        cv2.drawContours(img, [largest_contour], -1, color, thickness)  # 외곽선 그리기
+
+
+def draw_wall_structure(img, bbox_2d, segment_mask, all_segments_info, seg_map_resized, color, thickness=2):
+    """
+    벽 구조를 그립니다 (수직 평면, floor/ceiling과 만나는 곳에서 수직선으로 분리).
+    
+    Args:
+        img (numpy.ndarray): 이미지
+        bbox_2d (tuple): 2D 바운딩 박스
+        depth_map (numpy.ndarray): Depth 맵
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        all_segments_info (list): 모든 세그먼트 정보
+        seg_map_resized (numpy.ndarray): 리사이즈된 세그멘테이션 맵
+        color (tuple): 색상
+        thickness (int): 선 두께
+    """
+    # 외곽선 그리기
+    mask_uint8 = (segment_mask.astype(np.uint8) * 255)  # 마스크 변환
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 외곽선
+    if len(contours) > 0:  # 외곽선이 있으면
+        largest_contour = max(contours, key=cv2.contourArea)  # 가장 큰 외곽선
+        cv2.drawContours(img, [largest_contour], -1, color, thickness)  # 외곽선 그리기
+    
+    # floor와 ceiling 찾기
+    floor_segments = []  # floor 세그먼트
+    ceiling_segments = []  # ceiling 세그먼트
+    
+    for seg_info in all_segments_info:  # 각 세그먼트에 대해
+        seg_id = seg_info['id']  # 세그먼트 ID
+        seg_mask = (seg_map_resized == seg_id)  # 세그먼트 마스크
+        if np.any(seg_mask):  # 마스크가 있으면
+            y_coords, _ = np.where(seg_mask)  # Y 좌표
+            if len(y_coords) > 0:  # 좌표가 있으면
+                avg_y = y_coords.mean()  # 평균 Y
+                # 벽과 겹치는지 확인
+                overlap = np.any(seg_mask & segment_mask)  # 겹침 확인
+                if overlap:  # 겹치면
+                    # floor는 아래쪽, ceiling은 위쪽
+                    wall_y_coords, _ = np.where(segment_mask)  # 벽 Y 좌표
+                    if len(wall_y_coords) > 0:  # 좌표가 있으면
+                        wall_bottom = wall_y_coords.max()  # 벽 하단
+                        wall_top = wall_y_coords.min()  # 벽 상단
+                        if avg_y > wall_bottom * 0.8:  # 아래쪽이면
+                            floor_segments.append(seg_id)  # floor 추가
+                        elif avg_y < wall_top * 1.2:  # 위쪽이면
+                            ceiling_segments.append(seg_id)  # ceiling 추가
+    
+    # floor와 만나는 곳에서 수직선 그리기
+    for floor_id in floor_segments:  # 각 floor에 대해
+        floor_mask = (seg_map_resized == floor_id)  # floor 마스크
+        intersection = floor_mask & segment_mask  # 교집합
+        if np.any(intersection):  # 교집합이 있으면
+            y_coords, x_coords = np.where(intersection)  # 교집합 좌표
+            if len(y_coords) > 0:  # 좌표가 있으면
+                intersection_y = int(y_coords.max())  # 교집합 최대 Y (벽 하단)
+                unique_x = np.unique(x_coords)  # 고유한 X 좌표
+                for x in unique_x[::5]:  # 일부만 선택
+                    # 벽 내부로 수직선 그리기
+                    wall_y_coords, _ = np.where(segment_mask & (seg_map_resized[:, int(x)] == seg_map_resized[intersection_y, int(x)]))  # 벽 Y 좌표
+                    if len(wall_y_coords) > 0:  # 좌표가 있으면
+                        wall_top = wall_y_coords.min()  # 벽 상단
+                        # 수직선 그리기 (마스크 내부에만)
+                        draw_line_in_mask(img, (int(x), intersection_y), (int(x), wall_top), segment_mask, color, thickness)  # 선 그리기
+    
+    # ceiling과 만나는 곳에서 수직선 그리기
+    for ceiling_id in ceiling_segments:  # 각 ceiling에 대해
+        ceiling_mask = (seg_map_resized == ceiling_id)  # ceiling 마스크
+        intersection = ceiling_mask & segment_mask  # 교집합
+        if np.any(intersection):  # 교집합이 있으면
+            y_coords, x_coords = np.where(intersection)  # 교집합 좌표
+            if len(y_coords) > 0:  # 좌표가 있으면
+                intersection_y = int(y_coords.min())  # 교집합 최소 Y (벽 상단)
+                unique_x = np.unique(x_coords)  # 고유한 X 좌표
+                for x in unique_x[::5]:  # 일부만 선택
+                    # 벽 내부로 수직선 그리기
+                    wall_y_coords, _ = np.where(segment_mask & (seg_map_resized[:, int(x)] == seg_map_resized[intersection_y, int(x)]))  # 벽 Y 좌표
+                    if len(wall_y_coords) > 0:  # 좌표가 있으면
+                        wall_bottom = wall_y_coords.max()  # 벽 하단
+                        # 수직선 그리기 (마스크 내부에만)
+                        draw_line_in_mask(img, (int(x), intersection_y), (int(x), wall_bottom), segment_mask, color, thickness)  # 선 그리기
+
+
+def draw_table_bed_cube(img, bbox_2d, depth_map, segment_mask, color, thickness=2):
+    """
+    테이블/침대 구조를 그립니다 (직육면체, 퍼스펙티브 9개 선).
+    
+    Args:
+        img (numpy.ndarray): 이미지
+        bbox_2d (tuple): 2D 바운딩 박스
+        depth_map (numpy.ndarray): Depth 맵
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        color (tuple): 색상
+        thickness (int): 선 두께
+    """
+    x_min, y_min, x_max, y_max = bbox_2d  # 바운딩 박스
+    
+    # Depth 범위로 높이 추정
+    valid_depths = depth_map[segment_mask]  # 유효한 depth
+    if len(valid_depths) == 0:  # 유효한 depth가 없으면
+        return
+    min_depth = valid_depths.min()  # 최소 depth
+    max_depth = valid_depths.max()  # 최대 depth
+    depth_diff = max_depth - min_depth  # Depth 차이
+    
+    # 앞면 4개 정점 (가까운 면)
+    front_bottom_left = (x_min, y_max)  # 왼쪽 아래
+    front_bottom_right = (x_max, y_max)  # 오른쪽 아래
+    front_top_right = (x_max, y_min)  # 오른쪽 위
+    front_top_left = (x_min, y_min)  # 왼쪽 위
+    
+    # 뒷면 4개 정점 (원근 효과)
+    perspective_scale = 0.75  # 원근 축소 비율
+    center_x = (x_min + x_max) / 2  # 중심 X
+    center_y = (y_min + y_max) / 2  # 중심 Y
+    
+    back_bottom_left = (int(center_x + (x_min - center_x) * perspective_scale), 
+                        int(center_y + (y_max - center_y) * perspective_scale))  # 뒷면 왼쪽 아래
+    back_bottom_right = (int(center_x + (x_max - center_x) * perspective_scale),
+                         int(center_y + (y_max - center_y) * perspective_scale))  # 뒷면 오른쪽 아래
+    back_top_right = (int(center_x + (x_max - center_x) * perspective_scale),
+                      int(center_y + (y_min - center_y) * perspective_scale))  # 뒷면 오른쪽 위
+    back_top_left = (int(center_x + (x_min - center_x) * perspective_scale),
+                     int(center_y + (y_min - center_y) * perspective_scale))  # 뒷면 왼쪽 위
+    
+    # 9개 선 (앞면 4개 + 뒷면 4개 + 연결선 4개 중 1개만)
+    front_edges = [  # 앞면 4개 엣지
+        (front_bottom_left, front_bottom_right),
+        (front_bottom_right, front_top_right),
+        (front_top_right, front_top_left),
+        (front_top_left, front_bottom_left),
+    ]
+    
+    back_edges = [  # 뒷면 4개 엣지
+        (back_bottom_left, back_bottom_right),
+        (back_bottom_right, back_top_right),
+        (back_top_right, back_top_left),
+        (back_top_left, back_bottom_left),
+    ]
+    
+    connecting_edges = [  # 연결선 4개
+        (front_bottom_left, back_bottom_left),
+        (front_bottom_right, back_bottom_right),
+        (front_top_right, back_top_right),
+        (front_top_left, back_top_left),
+    ]
+    
+    # 모든 엣지 그리기 (마스크 내부에만)
+    for edge in front_edges + back_edges + connecting_edges:  # 모든 엣지에 대해
+        pt1, pt2 = edge  # 두 점
+        draw_line_in_mask(img, pt1, pt2, segment_mask, color, thickness)  # 마스크 내부에만 선 그리기
+
+
+def draw_bridge_chair_table(img, bbox_2d, depth_map, segment_mask, color, thickness=2):
+    """
+    다리/의자/테이블 구조를 그립니다 (수평 큐브 + 수직 큐브 다리).
+    
+    Args:
+        img (numpy.ndarray): 이미지
+        bbox_2d (tuple): 2D 바운딩 박스
+        depth_map (numpy.ndarray): Depth 맵
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        color (tuple): 색상
+        thickness (int): 선 두께
+    """
+    x_min, y_min, x_max, y_max = bbox_2d  # 바운딩 박스
+    center_x = (x_min + x_max) / 2  # 중심 X
+    
+    # 상판 (수평 큐브) - 상단 30%
+    top_height = int((y_max - y_min) * 0.3)  # 상판 높이
+    top_y_min = y_min  # 상판 상단
+    top_y_max = y_min + top_height  # 상판 하단
+    
+    # 상판 외곽선
+    top_mask = segment_mask.copy()  # 마스크 복사
+    top_mask[top_y_max:, :] = False  # 하단 제거
+    mask_uint8 = (top_mask.astype(np.uint8) * 255)  # 마스크 변환
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 외곽선
+    if len(contours) > 0:  # 외곽선이 있으면
+        largest_contour = max(contours, key=cv2.contourArea)  # 가장 큰 외곽선
+        cv2.drawContours(img, [largest_contour], -1, color, thickness)  # 외곽선 그리기
+    
+    # 다리 (수직 큐브) - 하단 70%, 좌우 2개
+    leg_width = (x_max - x_min) * 0.15  # 다리 너비
+    leg_left_x = int(x_min + (x_max - x_min) * 0.2)  # 왼쪽 다리 X
+    leg_right_x = int(x_min + (x_max - x_min) * 0.8)  # 오른쪽 다리 X
+    leg_top = top_y_max  # 다리 상단
+    leg_bottom = y_max  # 다리 하단
+    
+    # 왼쪽 다리
+    leg_left_mask = segment_mask.copy()  # 마스크 복사
+    leg_left_mask[:leg_top, :] = False  # 상단 제거
+    leg_left_mask[:, :int(leg_left_x - leg_width/2)] = False  # 왼쪽 제거
+    leg_left_mask[:, int(leg_left_x + leg_width/2):] = False  # 오른쪽 제거
+    if np.any(leg_left_mask):  # 마스크가 있으면
+        leg_contours, _ = cv2.findContours((leg_left_mask.astype(np.uint8) * 255), 
+                                          cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 외곽선
+        if len(leg_contours) > 0:  # 외곽선이 있으면
+            cv2.drawContours(img, leg_contours, -1, color, thickness)  # 외곽선 그리기
+    
+    # 오른쪽 다리
+    leg_right_mask = segment_mask.copy()  # 마스크 복사
+    leg_right_mask[:leg_top, :] = False  # 상단 제거
+    leg_right_mask[:, :int(leg_right_x - leg_width/2)] = False  # 왼쪽 제거
+    leg_right_mask[:, int(leg_right_x + leg_width/2):] = False  # 오른쪽 제거
+    if np.any(leg_right_mask):  # 마스크가 있으면
+        leg_contours, _ = cv2.findContours((leg_right_mask.astype(np.uint8) * 255), 
+                                          cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 외곽선
+        if len(leg_contours) > 0:  # 외곽선이 있으면
+            cv2.drawContours(img, leg_contours, -1, color, thickness)  # 외곽선 그리기
+
+
+def draw_building_structure(img, bbox_2d, depth_map, segment_mask, img_bgr_resized, color, thickness=2):
+    """
+    건물 구조를 그립니다 (큐브 외곽선 + 폴리곤, depth/edge 참조).
+    
+    Args:
+        img (numpy.ndarray): 이미지
+        bbox_2d (tuple): 2D 바운딩 박스
+        depth_map (numpy.ndarray): Depth 맵
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        img_bgr_resized (numpy.ndarray): 리사이즈된 원본 이미지
+        color (tuple): 색상
+        thickness (int): 선 두께
+    """
+    # 외곽선 그리기
+    mask_uint8 = (segment_mask.astype(np.uint8) * 255)  # 마스크 변환
+    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 외곽선
+    if len(contours) > 0:  # 외곽선이 있으면
+        largest_contour = max(contours, key=cv2.contourArea)  # 가장 큰 외곽선
+        cv2.drawContours(img, [largest_contour], -1, color, thickness)  # 외곽선 그리기
+    
+    # 이미지 엣지 찾기 (Canny)
+    img_gray = cv2.cvtColor(img_bgr_resized, cv2.COLOR_BGR2GRAY)  # 그레이스케일 변환
+    edges = cv2.Canny(img_gray, 50, 150)  # Canny 엣지 검출
+    edges_in_mask = edges & (segment_mask.astype(np.uint8) * 255)  # 마스크 내부 엣지만
+    
+    # Depth edge와 이미지 edge 결합
+    depth_h_edges, depth_v_edges = detect_depth_edges_in_segment(segment_mask, depth_map, threshold_ratio=0.1)  # Depth edge
+    combined_edges = (depth_h_edges | depth_v_edges) & (edges_in_mask > 0)  # 결합된 엣지
+    
+    # 엣지를 따라 선 그리기 (마스크 내부에만)
+    y_coords, x_coords = np.where(combined_edges)  # 엣지 좌표
+    if len(y_coords) > 10:  # 충분한 점이 있으면
+        # 간단한 폴리곤 표현 (일부 점만 연결)
+        points = list(zip(x_coords[::max(1, len(x_coords)//100)], y_coords[::max(1, len(y_coords)//100)]))  # 일부 점만
+        for i in range(len(points) - 1):  # 각 점 쌍에 대해
+            pt1, pt2 = points[i], points[i+1]  # 두 점
+            if segment_mask[pt1[1], pt1[0]] and segment_mask[pt2[1], pt2[0]]:  # 둘 다 마스크 내부이면
+                cv2.line(img, pt1, pt2, color, thickness)  # 선 그리기
+
+
+def draw_lamp_structure(img, bbox_2d, depth_map, segment_mask, color, thickness=2):
+    """
+    램프 구조를 그립니다 (수직 중심축 중심 원형 대칭).
+    
+    Args:
+        img (numpy.ndarray): 이미지
+        bbox_2d (tuple): 2D 바운딩 박스
+        depth_map (numpy.ndarray): Depth 맵
+        segment_mask (numpy.ndarray): 세그먼트 마스크
+        color (tuple): 색상
+        thickness (int): 선 두께
+    """
+    x_min, y_min, x_max, y_max = bbox_2d  # 바운딩 박스
+    center_x = (x_min + x_max) / 2  # 중심 X
+    center_y = (y_min + y_max) / 2  # 중심 Y
+    
+    # 수직 중심선 그리기 (마스크 내부에만)
+    for y in range(y_min, y_max, 2):  # 2픽셀 간격
+        x = int(center_x)  # 중심 X
+        if 0 <= y < segment_mask.shape[0] and 0 <= x < segment_mask.shape[1]:  # 범위 내이면
+            if segment_mask[y, x]:  # 마스크 내부이면
+                cv2.circle(img, (x, y), 1, color, thickness)  # 점 그리기
+    
+    # 원형 대칭 구조 (수평 원들)
+    height = y_max - y_min  # 높이
+    num_circles = 5  # 원 개수
+    for i in range(num_circles):  # 각 원에 대해
+        y = int(y_min + (y_max - y_min) * (i + 1) / (num_circles + 1))  # Y 좌표
+        radius = (x_max - x_min) / 2 * (1 - i * 0.1)  # 반지름 (위로 갈수록 작게)
+        
+        # 원 그리기 (마스크 내부에만)
+        for angle in range(0, 360, 15):  # 각도별로
+            rad = np.radians(angle)  # 라디안 변환
+            x = int(center_x + radius * np.cos(rad))  # X 좌표
+            py = int(y + radius * 0.3 * np.sin(rad))  # Y 좌표 (타원)
+            if 0 <= py < segment_mask.shape[0] and 0 <= x < segment_mask.shape[1]:  # 범위 내이면
+                if segment_mask[py, x]:  # 마스크 내부이면
+                    cv2.circle(img, (x, py), 1, color, thickness)  # 점 그리기
+
+
+def draw_shape_based_3d(img, segment_mask, depth_map, class_name, color, thickness=2, 
+                       all_segments_info=None, seg_map_resized=None, img_bgr_resized=None,
+                       vanishing_point=None):
+    """
+    클래스 이름을 기반으로 적절한 3D 형태를 그립니다.
+    
+    Args:
+        img (numpy.ndarray): 이미지 (BGR 형식)
+        segment_mask (numpy.ndarray): 세그먼트 마스크 (boolean)
+        depth_map (numpy.ndarray): Depth 맵
+        class_name (str): 클래스 이름
+        color (tuple): 색상 (B, G, R)
+        thickness (int): 선 두께
+        all_segments_info (list, optional): 모든 세그먼트 정보 (wall용)
+        seg_map_resized (numpy.ndarray, optional): 리사이즈된 세그멘테이션 맵 (wall용)
+        img_bgr_resized (numpy.ndarray, optional): 리사이즈된 원본 이미지 (building용)
+        vanishing_point (tuple, optional): 소실점 좌표 (vx, vy)
+    """
+    # 2D 바운딩 박스 계산
+    y_coords, x_coords = np.where(segment_mask)  # 마스크 영역의 좌표 추출
+    if len(y_coords) == 0 or len(x_coords) == 0:  # 좌표가 없으면
+        return
+    
+    x_min, x_max = int(x_coords.min()), int(x_coords.max())  # X 범위
+    y_min, y_max = int(y_coords.min()), int(y_coords.max())  # Y 범위
+    bbox_2d = (x_min, y_min, x_max, y_max)  # 2D 바운딩 박스
+    
+    # 클래스 이름으로 형태 결정
+    shape_type = get_shape_type_from_class(class_name)  # 형태 타입 가져오기
+    
+    # 형태에 따라 그리기
+    if shape_type == "outline_only":  # 외곽선만
+        draw_outline_only(img, segment_mask, color, thickness)  # 외곽선 그리기
+    elif shape_type == "horizontal_plane":  # 수평 평면
+        draw_outline_only(img, segment_mask, color, thickness)  # 외곽선만 그리기
+    elif shape_type == "wall":  # 벽
+        if all_segments_info is not None and seg_map_resized is not None:  # 필요한 정보가 있으면
+            draw_wall_structure(img, bbox_2d, segment_mask, all_segments_info, 
+                              seg_map_resized, color, thickness)  # 벽 그리기
+        else:  # 정보가 없으면
+            draw_outline_only(img, segment_mask, color, thickness)  # 기본 외곽선 그리기
+    elif shape_type == "topographic":  # 등고선 (mountain, earth)
+        draw_contour_lines(img, segment_mask, depth_map, color, thickness)  # 등고선 그리기
+    elif shape_type == "cube_perspective":  # 큐브 (Depth 기반 + 이미지 edge 결합)
+        draw_cube_perspective(img, bbox_2d, depth_map, segment_mask, color, vanishing_point, thickness, img_bgr_resized)  # Depth 기반 큐브 그리기
+    elif shape_type == "person":  # 사람
+        draw_person_structure(img, bbox_2d, segment_mask, color, thickness)  # 사람 그리기
+    elif shape_type == "cylinder_symmetric":  # 실린더
+        draw_cylinder_symmetric(img, bbox_2d, segment_mask, color, thickness)  # 실린더 그리기
+    else:  # 기본값
+        draw_outline_only(img, segment_mask, color, thickness)  # 외곽선만 그리기
+
+
+# ============================================================================
+# 시각화 함수
+# ============================================================================
+
+
+
+def visualize_cv2_all(img_bgr, seg_map, segments_info, id2label, is_thing_map, 
+                     depth_map, filename, seg_time, depth_time, show_depth_mode=False, 
+                     show_3d_boxes=False, selected_segment_id=None, mouse_x=None, mouse_y=None, mouse_segment_info=None,
+                     show_face_instances=False):
+    """
+    Panoptic Segmentation과 Depth Estimation 결과를 OpenCV를 사용하여 시각화합니다.
+    
+    이 함수는 세그멘테이션 결과와 depth 정보를 받아서 Thing과 Stuff를 구분하여 시각화하고,
+    각 세그먼트의 클래스 이름, 신뢰도 점수, 평균 거리, 통계 정보를 이미지에 오버레이합니다.
+    
+    Args:
+        img_bgr (numpy.ndarray): 원본 이미지 (BGR 형식)
+        seg_map (numpy.ndarray): 세그멘테이션 맵 (각 픽셀의 세그먼트 ID)
+        segments_info (list): 각 세그먼트의 정보 딕셔너리 리스트 (id, label_id, score 등)
+        id2label (dict): 라벨 ID를 클래스 이름으로 매핑하는 딕셔너리
+        is_thing_map (dict): 라벨 ID를 Thing 여부(bool)로 매핑하는 딕셔너리
+        depth_map (numpy.ndarray): Depth 맵 (이미지와 동일한 크기)
+        filename (str): 현재 처리 중인 이미지 파일명
+        seg_time (float): Segmentation 추론에 소요된 시간(초)
+        depth_time (float): Depth Estimation 추론에 소요된 시간(초)
+        show_depth_mode (bool): True면 Depth Map을 배경으로 사용, False면 원본 이미지 사용
+        show_3d_boxes (bool): True면 3D 바운딩 박스 표시
+        selected_segment_id (int, optional): 선택된 세그먼트 ID (None이면 모두 표시)
+    
+    Returns:
+        numpy.ndarray: 시각화된 이미지 (BGR 형식)
+    """
+    h, w = img_bgr.shape[:2]  # 이미지 높이와 너비 추출
+    target_w = int(w * TARGET_HEIGHT / h)  # 비율 유지하며 목표 너비 계산
+    
+    # Depth 맵 리사이즈
+    depth_resized = cv2.resize(depth_map, (target_w, TARGET_HEIGHT), interpolation=cv2.INTER_LINEAR)  # Depth 맵 리사이즈
+    
+    # 배경 이미지 선택 (소실점 검출을 위해 원본 이미지 필요)
+    resized_orig_temp = cv2.resize(img_bgr, (target_w, TARGET_HEIGHT), interpolation=cv2.INTER_LINEAR)  # 원본 이미지 리사이즈
+    
+    # 소실점 검출 (depth 보정을 위해 먼저 검출)
+    vp_detector = VanishingPointDetector()  # 소실점 검출기 생성
+    vanishing_point = vp_detector.find_vanishing_point(resized_orig_temp)  # 소실점 검출
+    
+    # 소실점을 이용한 depth 보정
+    depth_resized = correct_depth_with_vanishing_point(depth_resized, vanishing_point, weight=0.3)  # Depth 보정
+    
+    # Depth 값을 0-255 범위로 정규화 (가까운 곳이 밝게)
+    # pipeline("depth-estimation") 사용 시: 큰 값 = 가까움, 작은 값 = 먼 것
+    # 따라서 큰 값(가까운 것)을 밝게 표시
+    depth_min = depth_resized.min()  # 최소값 (가장 먼 것)
+    depth_max = depth_resized.max()  # 최대값 (가장 가까운 것)
+    if depth_max > depth_min:  # 범위가 있으면
+        # 큰 값(가까운 것)을 밝게 표시
+        depth_normalized = ((depth_resized - depth_min) / (depth_max - depth_min) * 255).astype(np.uint8)  # 정규화
+    else:  # 범위가 없으면
+        depth_normalized = np.zeros_like(depth_resized, dtype=np.uint8)  # 모두 0
+    
+    # 배경 이미지 선택 (Depth 모드면 Depth 맵, 아니면 원본 이미지)
+    if show_depth_mode:  # Depth 모드면
+        resized_orig = cv2.cvtColor(depth_normalized, cv2.COLOR_GRAY2BGR)  # Depth 맵을 BGR로 변환
+    else:  # 일반 모드면
+        resized_orig = resized_orig_temp  # 원본 이미지 사용
+    
+    overlay_stuff = np.zeros_like(resized_orig, dtype=np.uint8)  # Stuff 오버레이 초기화
+    
+    inst_info = {s['id']: s for s in segments_info}  # 세그먼트 정보를 딕셔너리로 변환
+    unique_ids = np.unique(seg_map)  # 고유 세그먼트 ID 추출
+    
+    # 선택된 세그먼트만 필터링
+    if selected_segment_id is not None:  # 세그먼트가 선택되었으면
+        if selected_segment_id in unique_ids:  # 선택된 ID가 있으면
+            unique_ids = np.array([selected_segment_id])  # 선택된 ID만 사용
+        else:  # 선택된 ID가 없으면
+            unique_ids = np.array([])  # 빈 배열
+    centroids = {}  # 중심점 저장 딕셔너리 초기화
+    segment_depths = {}  # 세그먼트별 depth 저장 딕셔너리 초기화
+    
+    # 세그멘테이션 맵 리사이즈
+    seg_map_resized = cv2.resize(seg_map.astype(np.float32), (target_w, TARGET_HEIGHT), 
+                                 interpolation=cv2.INTER_NEAREST).astype(seg_map.dtype)
+    
+    # Stuff 그리기
+    for i, cid in enumerate(unique_ids):  # 각 고유 ID 순회
+        if cid not in inst_info:  # 정보가 없으면 건너뛰기
+            continue
+        info = inst_info[cid]  # 세그먼트 정보 가져오기
+        label_id = info['label_id']  # 라벨 ID 추출
+        is_thing = is_thing_map.get(label_id, False)  # Thing 여부 확인
+        
+        if is_thing:  # Thing이면 건너뛰기
+            continue
+
+        mask_resized = (seg_map_resized == cid)  # 리사이즈된 마스크 생성
+        if not np.any(mask_resized):  # 마스크가 비어있으면 건너뛰기
+            continue
+        
+        b, g, r = get_color(i)  # 색상 가져오기
+        overlay_stuff[mask_resized] = (b, g, r)  # Stuff 영역에 색상 적용
+        
+        # 중심점 및 depth 계산
+        y, x = np.where(mask_resized)  # 마스크 영역의 좌표 추출
+        if len(y) > 0 and len(x) > 0:  # 좌표가 있으면
+            centroids[int(cid)] = (int(x.mean()), int(y.mean()))  # 중심점 계산 및 저장
+            segment_depths[int(cid)] = calculate_segment_depth(seg_map_resized, cid, depth_resized)  # Depth 계산
+
+    # Stuff 오버레이 블렌딩 (Depth 모드에서는 더 투명하게)
+    if show_depth_mode:  # Depth 모드면
+        alpha = 80 / 255.0  # 더 투명하게 설정
+    else:  # 일반 모드면
+        alpha = 120 / 255.0  # 기본 투명도 설정
+    blended = cv2.addWeighted(overlay_stuff, alpha, resized_orig, 1 - alpha, 0)  # Stuff 오버레이와 배경 이미지 블렌딩
+
+    # Thing 그리기
+    for i, cid in enumerate(unique_ids):  # 각 고유 ID 순회
+        if cid not in inst_info:  # 정보가 없으면 건너뛰기
+            continue
+            
+        info = inst_info[cid]  # 세그먼트 정보 가져오기
+        label_id = info['label_id']  # 라벨 ID 추출
+        is_thing = is_thing_map.get(label_id, False)  # Thing 여부 확인
+        
+        if not is_thing:  # Thing이 아니면 건너뛰기
+            continue
+
+        mask_resized = (seg_map_resized == cid)  # 리사이즈된 마스크 생성
+        if not np.any(mask_resized):  # 마스크가 비어있으면 건너뛰기
+            continue
+        
+        mask_uint8 = (mask_resized.astype(np.uint8) * 255)  # 마스크를 0-255 범위로 변환
+        
+        b, g, r = get_color(i)  # 색상 가져오기
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 외곽선 찾기
+        cv2.drawContours(blended, contours, -1, (b, g, r), 2)  # Thing 외곽선 그리기
+        
+        # 중심점 및 depth 계산
+        y, x = np.where(mask_resized)  # 마스크 영역의 좌표 추출
+        if len(y) > 0 and len(x) > 0:  # 좌표가 있으면
+            centroids[int(cid)] = (int(x.mean()), int(y.mean()))  # 중심점 계산 및 저장
+            segment_depths[int(cid)] = calculate_segment_depth(seg_map_resized, cid, depth_resized)  # Depth 계산
+
+    # 라벨 + 신뢰도 + Depth 텍스트
+    font_scale = cv2.getFontScaleFromHeight(cv2.FONT_HERSHEY_SIMPLEX, 12, 1)  # 폰트 크기 계산
+    
+    for cid, (cx, cy) in centroids.items():  # 각 중심점에 대해
+        label_id = inst_info[cid]['label_id']  # 라벨 ID 가져오기
+        class_name = id2label.get(label_id, str(label_id)).split(';')[0]  # 클래스 이름 가져오기 (세미콜론으로 분리, 첫 번째만)
+        score = inst_info[cid].get('score', 0.0)  # 신뢰도 점수 가져오기
+        avg_depth = segment_depths.get(cid, 0.0)  # 평균 depth 가져오기
+        
+        is_thing = is_thing_map.get(label_id, False)  # Thing 여부 확인
+        text_color = (0, 255, 255) if is_thing else (255, 255, 255)  # Thing은 노란색, Stuff는 흰색
+        
+        # 첫 번째 줄: 클래스 이름
+        label_text = f"{class_name}"  # 라벨 텍스트 생성
+        cv2.putText(blended, label_text, (cx - 10, cy),  # 텍스트 그리기
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1, cv2.LINE_AA)
+        
+        # 두 번째 줄: 신뢰도
+        score_text = f"[{label_id}] {score:.2f}"  # 신뢰도 텍스트 생성
+        cv2.putText(blended, score_text, (cx - 10, cy + 15),  # 신뢰도 텍스트 그리기
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.8, text_color, 1, cv2.LINE_AA)
+        
+        # 세 번째 줄: Depth (상대적 거리)
+        depth_text = f"D: {avg_depth:.3f}"  # Depth 텍스트 생성
+        cv2.putText(blended, depth_text, (cx - 10, cy + 30),  # Depth 텍스트 그리기
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.8, text_color, 1, cv2.LINE_AA)
+    
+    # 소실점 위치에 십자가 표시 (빨간색, 3D 박스 모드일 때만)
+    if show_3d_boxes:  # 3D 박스 모드일 때만 표시
+        cv2.drawMarker(blended, vanishing_point, (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
+    
+    # 3D 형태 기반 시각화
+    if show_3d_boxes:  # 3D 박스 표시 모드면
+        for cid in unique_ids:  # 각 세그먼트에 대해
+            if cid not in inst_info:  # 정보가 없으면 건너뛰기
+                continue
+            
+            mask_resized = (seg_map_resized == cid)  # 리사이즈된 마스크 생성
+            if not np.any(mask_resized):  # 마스크가 비어있으면 건너뛰기
+                continue
+            
+            # 클래스 이름 가져오기
+            label_id = inst_info[cid]['label_id']  # 라벨 ID 가져오기
+            class_name = id2label.get(label_id, str(label_id)).split(';')[0]  # 클래스 이름 가져오기 (세미콜론으로 분리, 첫 번째만)
+            
+            # 색상 가져오기 (세그먼트 인덱스로)
+            segment_idx = list(unique_ids).index(cid)  # 세그먼트 인덱스 찾기
+            b, g, r = get_color(segment_idx)  # 색상 가져오기
+            
+            # 클래스 이름 기반 3D 형태 그리기
+            draw_shape_based_3d(blended, mask_resized, depth_resized, class_name, (b, g, r), thickness=2,
+                              all_segments_info=segments_info, seg_map_resized=seg_map_resized, 
+                              img_bgr_resized=resized_orig, vanishing_point=vanishing_point)  # 형태 기반 3D 그리기
+
+    # 상단 정보
+    thing_count = sum(1 for s in segments_info if is_thing_map.get(s['label_id'], False))  # Thing 개수 계산
+    stuff_count = len(segments_info) - thing_count  # Stuff 개수 계산
+    
+    # Face Instance 표시 (show_face_instances가 True일 때)
+    if show_face_instances:  # Face Instance 표시 모드
+        face_alpha = 0.4  # Face 오버레이 투명도
+        for seg_info in segments_info:  # 각 세그먼트에 대해
+            if seg_info.get('is_face', False):  # Face Instance면
+                face_id = seg_info['id']
+                original_id = seg_info.get('original_id', face_id)
+                face_name = seg_info.get('face_name', 'unknown')
+                
+                # Face mask 추출
+                face_mask = (seg_map_resized == face_id)  # Face mask
+                
+                if not np.any(face_mask):  # 마스크가 비어있으면
+                    continue
+                
+                # 원본 세그먼트의 색상 가져오기
+                original_idx = None
+                for i, s in enumerate(segments_info):
+                    if s.get('id') == original_id and not s.get('is_face', False):
+                        original_idx = i
+                        break
+                
+                if original_idx is not None:
+                    b, g, r = get_color(original_idx)  # 원본 색상
+                    # Face는 더 밝게 표시 (1.5배)
+                    b = min(255, int(b * 1.5))
+                    g = min(255, int(g * 1.5))
+                    r = min(255, int(r * 1.5))
+                else:
+                    b, g, r = (200, 200, 200)  # 기본 회색
+                
+                # Face 오버레이 그리기
+                overlay = blended.copy()
+                overlay[face_mask] = [b, g, r]  # Face 영역 색상 적용
+                blended = cv2.addWeighted(overlay, face_alpha, blended, 1 - face_alpha, 0)  # 블렌딩
+                
+                # Face 이름 표시 (선택적, 작은 텍스트)
+                if np.any(face_mask):
+                    y_coords, x_coords = np.where(face_mask)
+                    if len(y_coords) > 0:
+                        center_y = int(np.mean(y_coords))
+                        center_x = int(np.mean(x_coords))
+                        face_label = f"{face_name}"
+                        cv2.putText(blended, face_label, (center_x - 20, center_y), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
+    
+    # 모드 표시
+    mode_text = "Depth Map Mode" if show_depth_mode else "Segmentation Mode"  # 모드 텍스트
+    box_text = " | 3D Boxes ON" if show_3d_boxes else ""  # 3D 박스 상태 텍스트
+    face_text = " | Face Instances ON" if show_face_instances else ""  # Face Instance 상태 텍스트
+    select_text = f" | Selected: {selected_segment_id}" if selected_segment_id is not None else ""  # 선택된 세그먼트 텍스트
+    info_text = f"{filename} | T:{thing_count} S:{stuff_count} | {mode_text}{box_text}{face_text}{select_text}"  # 정보 텍스트 생성
+    cv2.putText(blended, info_text, (10, 20),  # 상단 왼쪽에 정보 표시
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 0, 0), 1, cv2.LINE_AA)
+    
+    # 시간 정보
+    time_text = f"Seg: {seg_time:.3f}s | Depth: {depth_time:.3f}s"  # 추론 시간 텍스트 생성
+    (tw, th), _ = cv2.getTextSize(time_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)  # 텍스트 크기 계산
+    cv2.putText(blended, time_text, (target_w - tw - 10, 20),  # 상단 오른쪽에 시간 표시
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 0, 0), 1, cv2.LINE_AA)
+    
+    # Depth 범위 정보 (Depth 모드일 때만)
+    if show_depth_mode:  # Depth 모드면
+        depth_range_text = f"Range: {depth_min:.3f} ~ {depth_max:.3f} (가까운 곳=밝게)"  # Depth 범위 텍스트 생성
+        (tw2, th2), _ = cv2.getTextSize(depth_range_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.7, 1)  # 텍스트 크기 계산
+        cv2.putText(blended, depth_range_text, (target_w - tw2 - 10, 45),  # 상단 오른쪽에 범위 표시
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.7, (255, 255, 255), 1, cv2.LINE_AA)
+    
+    # 마우스 위치 정보 표시
+    if mouse_x is not None and mouse_y is not None and mouse_segment_info is not None:  # 마우스 정보가 있으면
+        # 마우스 위치에 십자가 표시
+        cv2.drawMarker(blended, (mouse_x, mouse_y), (0, 255, 0), markerType=cv2.MARKER_CROSS, markerSize=10, thickness=1)  # 십자가 표시
+        
+        # 텍스트 배경 (반투명 사각형)
+        info = mouse_segment_info  # 마우스 세그먼트 정보
+        class_text = info['class_name']  # 클래스 이름
+        id_text = f"ID: {info['id']}"  # ID 텍스트
+        depth_text = f"Depth: {info['depth']:.3f}"  # Depth 텍스트
+        
+        # 텍스트 크기 계산
+        (tw1, th1), _ = cv2.getTextSize(class_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)  # 클래스 이름 크기
+        (tw2, th2), _ = cv2.getTextSize(id_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.8, 1)  # ID 텍스트 크기
+        (tw3, th3), _ = cv2.getTextSize(depth_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.8, 1)  # Depth 텍스트 크기
+        
+        # 배경 사각형 크기
+        bg_width = max(tw1, tw2, tw3) + 10  # 배경 너비
+        bg_height = th1 + th2 + th3 + 15  # 배경 높이
+        
+        # 텍스트 위치 (마우스 위치 기준, 화면 밖으로 나가지 않도록)
+        text_x = mouse_x + 15  # 텍스트 X 좌표
+        text_y = mouse_y - 10  # 텍스트 Y 좌표
+        
+        # 화면 밖으로 나가지 않도록 조정
+        if text_x + bg_width > target_w:  # 오른쪽으로 나가면
+            text_x = mouse_x - bg_width - 15  # 왼쪽에 표시
+        if text_y - bg_height < 0:  # 위로 나가면
+            text_y = mouse_y + bg_height + 10  # 아래에 표시
+        
+        # 반투명 배경 그리기
+        overlay = blended.copy()  # 오버레이 복사
+        cv2.rectangle(overlay, (text_x - 5, text_y - bg_height), (text_x + bg_width, text_y + 5), (0, 0, 0), -1)  # 검은색 배경
+        cv2.addWeighted(overlay, 0.7, blended, 0.3, 0, blended)  # 반투명 블렌딩
+        
+        # 텍스트 그리기
+        cv2.putText(blended, class_text, (text_x, text_y - th2 - th3 - 5),  # 클래스 이름 표시
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 0), 2, cv2.LINE_AA)  # 초록색, 두껍게
+        cv2.putText(blended, id_text, (text_x, text_y - th3 - 2),  # ID 표시
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.8, (255, 255, 255), 1, cv2.LINE_AA)  # 흰색
+        cv2.putText(blended, depth_text, (text_x, text_y),  # Depth 표시
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.8, (255, 255, 255), 1, cv2.LINE_AA)  # 흰색
+
+    window_name = "OneFormer + Depth - Panoptic Segmentation"  # 윈도우 이름 설정
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)  # 윈도우 생성
+    cv2.resizeWindow(window_name, target_w, TARGET_HEIGHT)  # 윈도우 크기 조정
+    cv2.moveWindow(window_name, 0, 0)  # 윈도우 위치 이동
+    cv2.imshow(window_name, blended)  # 이미지 표시
+    return blended, seg_map_resized, depth_resized, vanishing_point  # 블렌딩된 이미지, 리사이즈된 세그멘테이션 맵, 리사이즈된 depth 맵, 소실점 반환
+
+
+# ============================================================================
+# 모델 초기화
+# ============================================================================
+
+def initialize_models():
+    """
+    Segmentation 및 Depth Estimation 모델을 초기화합니다.
+    
+    Returns:
+        tuple: (processor, segmentation_model, depth_estimator, device)
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # GPU 사용 가능 여부에 따라 디바이스 선택
+    print(f"🔧 디바이스: {device}")  # 디바이스 정보 출력
+    
+    # Segmentation 모델 로드
+    print(f"🔧 Segmentation 모델 로드: {SEGMENTATION_MODEL}")  # 모델 로드 메시지 출력
+    processor = OneFormerProcessor.from_pretrained(SEGMENTATION_MODEL)  # 프로세서 로드
+    segmentation_model = OneFormerForUniversalSegmentation.from_pretrained(SEGMENTATION_MODEL)  # 모델 로드
+    segmentation_model.to(device)  # 모델을 디바이스로 이동
+    segmentation_model.eval()  # 평가 모드로 설정
+    
+    # Depth Estimation 모델 로드
+    print(f"🔧 Depth 모델 로드: {DEPTH_MODEL}")  # Depth 모델 로드 메시지 출력
+    depth_estimator = pipeline("depth-estimation", model=DEPTH_MODEL, device=0 if device.type == "cuda" else -1)  # Depth 추정 파이프라인 생성
+    
+    return processor, segmentation_model, depth_estimator, device
+
+
+# ============================================================================
+# 추론 함수
+# ============================================================================
+
+def run_inference(idx, processor, segmentation_model, depth_estimator, device, 
+                 id2label, is_thing_map, image_files):
+    """
+    지정된 인덱스의 이미지에 대해 Panoptic Segmentation과 Depth Estimation 추론을 수행합니다.
+    
+    이 함수는 이미지 파일을 로드하고, OneFormer 모델을 사용하여 세그멘테이션을 수행하고,
+    MiDaS 모델을 사용하여 Depth Estimation을 수행한 후, 결과를 시각화 함수로 전달합니다.
+    
+    Args:
+        idx (int): image_files 리스트에서 처리할 이미지의 인덱스
+        processor: OneFormer 프로세서
+        segmentation_model: OneFormer 모델
+        depth_estimator: MiDaS Depth Estimation 파이프라인
+        device: PyTorch 디바이스
+        id2label (dict): 라벨 ID를 클래스 이름으로 매핑하는 딕셔너리
+        is_thing_map (dict): 라벨 ID를 Thing 여부(bool)로 매핑하는 딕셔너리
+        image_files (list): 이미지 파일 경로 리스트
+    
+    출력:
+        - 현재 이미지 정보 (인덱스/총 개수, 파일명)
+        - Thing/Stuff 개수 디버그 정보
+        - 추론 완료 메시지 및 소요 시간
+        - 시각화된 결과 이미지 (OpenCV 윈도우)
+    """
+    img_path = image_files[idx]  # 이미지 경로 가져오기
+    filename = os.path.basename(img_path)  # 파일명 추출
+    
+    img_bgr = cv2.imread(img_path)  # 이미지 읽기 (BGR 형식)
+    if img_bgr is None:  # 이미지 로드 실패 시
+        print(f"❌ 이미지 로드 실패: {img_path}")  # 에러 메시지 출력
+        return None
+   
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)  # BGR을 RGB로 변환
+    h, w = img_bgr.shape[:2]  # 이미지 크기 추출
+    
+    print(f"\n📂 [{idx+1}/{len(image_files)}] {filename}")  # 현재 이미지 정보 출력
+    
+    # Panoptic Segmentation 추론
+    inputs = processor(images=img_rgb, task_inputs=["panoptic"], return_tensors="pt")  # 이미지 전처리
+    inputs = {k: v.to(device) for k, v in inputs.items()}  # 입력을 디바이스로 이동
+    
+    seg_start_time = time.time()  # Segmentation 시작 시간 기록
+    with torch.no_grad():  # 그래디언트 계산 비활성화
+        seg_outputs = segmentation_model(**inputs)  # 모델 추론 수행
+    seg_time = time.time() - seg_start_time  # Segmentation 추론 시간 계산
+        
+    panoptic_result = processor.post_process_panoptic_segmentation(  # Panoptic 세그멘테이션 후처리
+        seg_outputs, target_sizes=[(h, w)])[0]
+    
+    seg_map = panoptic_result["segmentation"].cpu().numpy()  # 세그멘테이션 맵 추출
+    segments_info = panoptic_result["segments_info"]  # 세그먼트 정보 추출
+    
+    # Depth Estimation 추론
+    img_pil = Image.fromarray(img_rgb)  # PIL Image로 변환
+    depth_start_time = time.time()  # Depth 시작 시간 기록
+    depth_result = depth_estimator(img_pil)  # Depth 추정 수행
+    depth_time = time.time() - depth_start_time  # Depth 추론 시간 계산
+    
+    # Depth 맵을 numpy array로 변환
+    depth_map = np.array(depth_result["depth"])  # Depth 맵 추출
+    
+    thing_count = sum(1 for s in segments_info if is_thing_map.get(s['label_id'], False))  # Thing 개수 계산
+    print(f"DEBUG - Thing: {thing_count}, Stuff: {len(segments_info) - thing_count}")  # 디버그 정보 출력
+    print(f"✓ Segmentation 완료 ({seg_time:.4f}초)")  # Segmentation 완료 메시지 출력
+    print(f"✓ Depth Estimation 완료 ({depth_time:.4f}초)")  # Depth 완료 메시지 출력
+    
+    # Face Instance 생성
+    K = get_camera_matrix(w, h)  # 카메라 행렬 생성
+    extended_seg_map, extended_segments_info, face_count = create_face_instances(
+        seg_map, segments_info, depth_map, K, id2label
+    )
+    if face_count > 0:  # Face Instance가 생성되었으면
+        print(f"✓ Face Instance 생성 완료 ({face_count}개)")  # Face Instance 생성 메시지 출력
+
+    return extended_seg_map, extended_segments_info, depth_map, img_bgr, filename, seg_time, depth_time  # 결과 반환
+
+
+# ============================================================================
+# 메인 함수
+# ============================================================================
+
+def main():
+    """
+    프로그램의 메인 실행 루프입니다.
+    
+    이 함수는 프로그램의 진입점으로, 모델을 초기화하고 첫 번째 이미지를 자동으로 로드하며,
+    키보드 입력을 받아 이미지 간 이동을 처리하는 인터랙티브 루프를 실행합니다.
+    
+    실행 흐름:
+        1. 이미지 파일 목록 로드
+        2. 모델 초기화 (Segmentation + Depth)
+        3. ADE20K 매핑 데이터 로드
+        4. 첫 번째 이미지(인덱스 0) 자동 추론 및 시각화
+        5. 사용법 안내 메시지 출력
+        6. 무한 루프로 키보드 입력 대기
+        7. 입력에 따라 이전/다음 이미지로 이동하거나 프로그램 종료
+    
+    키보드 입력:
+        - 'A' 또는 왼쪽 화살표 (0x250000): 이전 이미지로 이동
+        - 'D' 또는 오른쪽 화살표 (0x270000): 다음 이미지로 이동
+        - 'S': Depth Map 표시 (밝기로, 가까운 곳=밝게)
+        - 'Q': 프로그램 종료
+    
+    특징:
+        - 이미지 인덱스는 순환 구조 (마지막 이미지에서 다음 = 첫 이미지)
+        - 각 이미지 이동 시 자동으로 추론 및 시각화 수행
+        - 종료 시 모든 OpenCV 윈도우 자동 닫기
+    """
+    # 이미지 리스트 로드
+    image_files = sorted(glob.glob(os.path.join(IMAGE_DIR, "*.jpg")))  # JPG 파일 목록 정렬
+    if not image_files:  # 이미지가 없으면
+        raise FileNotFoundError(f"'{IMAGE_DIR}'에 이미지가 없습니다.")  # 에러 발생
+    print(f"📂 {len(image_files)}개 이미지")  # 이미지 개수 출력
+    
+    # 모델 초기화
+    processor, segmentation_model, depth_estimator, device = initialize_models()  # 모델 초기화
+    
+    # ADE20K 공식 Thing/Stuff 분류 및 클래스 이름 사용
+    from ade20k_thing_stuff_map import ADE20K_THING_STUFF_CLASSES, ADE20K_CLASS_NAMES  # ADE20K 매핑 데이터 import
+    
+    is_thing_map = ADE20K_THING_STUFF_CLASSES  # Thing/Stuff 분류 맵 설정
+    id2label = ADE20K_CLASS_NAMES  # 공식 클래스 이름 사용
+    
+    thing_count = sum(1 for v in is_thing_map.values() if v)  # Thing 클래스 개수 계산
+    stuff_count = sum(1 for v in is_thing_map.values() if not v)  # Stuff 클래스 개수 계산
+    print(f"✓ ADE20K 공식 Thing/Stuff 분류 사용 (CSAILVision MIT)")  # 분류 사용 메시지 출력
+    print(f"  - Thing: {thing_count}개 클래스")  # Thing 개수 출력
+    print(f"  - Stuff: {stuff_count}개 클래스")  # Stuff 개수 출력
+    
+    # 첫 번째 이미지 추론
+    cur_idx = 0  # 현재 이미지 인덱스 초기화
+    show_depth_mode = False  # Depth 모드 상태 초기화 (False = Segmentation 모드)
+    show_3d_boxes = False  # 3D 박스 표시 상태 초기화
+    show_face_instances = False  # Face Instance 표시 상태 초기화
+    selected_segment_id = None  # 선택된 세그먼트 ID 초기화
+    
+    # 현재 추론 결과 저장 변수
+    current_seg_map = None  # 현재 세그멘테이션 맵
+    current_seg_map_resized = None  # 현재 리사이즈된 세그멘테이션 맵
+    current_segments_info = None  # 현재 세그먼트 정보
+    current_depth_map = None  # 현재 Depth 맵
+    current_depth_map_resized = None  # 현재 리사이즈된 Depth 맵
+    current_img_bgr = None  # 현재 이미지
+    current_filename = None  # 현재 파일명
+    current_seg_time = 0.0  # 현재 Segmentation 시간
+    current_depth_time = 0.0  # 현재 Depth 시간
+    
+    # 마우스 위치 정보 저장 변수
+    mouse_x = None  # 마우스 X 좌표
+    mouse_y = None  # 마우스 Y 좌표
+    mouse_segment_info = None  # 마우스 위치의 세그먼트 정보 (class_name, id, depth)
+    current_vanishing_point = None  # 현재 소실점 좌표
+    
+    # 마우스 콜백 함수 (전역 변수 접근을 위해 클로저 사용)
+    def mouse_callback(event, x, y, flags, param):
+        """마우스 이벤트 처리 (클릭 및 이동)"""
+        nonlocal selected_segment_id, current_seg_map_resized, current_segments_info, current_seg_map
+        nonlocal mouse_x, mouse_y, mouse_segment_info, current_depth_map_resized, id2label, current_vanishing_point
+        
+        if event == cv2.EVENT_MOUSEMOVE:  # 마우스 이동
+            mouse_x = x  # 마우스 X 좌표 저장
+            mouse_y = y  # 마우스 Y 좌표 저장
+            
+            # 마우스 위치의 세그먼트 정보 찾기
+            if current_seg_map_resized is not None and current_depth_map_resized is not None:  # 데이터가 있으면
+                h, w = current_seg_map_resized.shape[:2]  # 리사이즈된 맵 크기
+                if 0 <= y < h and 0 <= x < w:  # 범위 내이면
+                    # 주변 영역에서 모든 세그먼트 찾기
+                    search_radius = 3  # 검색 반경
+                    y_min = max(0, y - search_radius)  # Y 최소값
+                    y_max = min(h, y + search_radius + 1)  # Y 최대값
+                    x_min = max(0, x - search_radius)  # X 최소값
+                    x_max = min(w, x + search_radius + 1)  # X 최대값
+                    
+                    nearby_segments = {}  # 주변 세그먼트 딕셔너리 {seg_id: depth}
+                    for py in range(y_min, y_max):  # Y 범위
+                        for px in range(x_min, x_max):  # X 범위
+                            seg_id = int(current_seg_map_resized[py, px])  # 세그먼트 ID
+                            if seg_id != 0:  # 배경이 아니면
+                                depth = current_depth_map_resized[py, px]  # Depth 값
+                                if seg_id not in nearby_segments:  # 처음 발견한 세그먼트면
+                                    nearby_segments[seg_id] = depth  # Depth 저장
+                                else:  # 이미 발견한 세그먼트면
+                                    # 더 가까운 depth로 업데이트 (큰 값 = 가까움)
+                                    if depth > nearby_segments[seg_id]:  # 더 가까우면 (큰 값)
+                                        nearby_segments[seg_id] = depth  # Depth 업데이트
+                    
+                    if len(nearby_segments) > 0:  # 세그먼트가 있으면
+                        # Depth가 가장 큰 것(가장 가까운 것) 선택 (큰 값 = 가까움)
+                        closest_seg_id = max(nearby_segments.items(), key=lambda x: x[1])[0]  # 가장 가까운 세그먼트 ID
+                        closest_depth = nearby_segments[closest_seg_id]  # 가장 가까운 depth
+                        
+                        # 세그먼트 정보 찾기
+                        for seg_info in current_segments_info:  # 각 세그먼트에 대해
+                            if seg_info['id'] == closest_seg_id:  # 일치하는 ID면
+                                label_id = seg_info.get('label_id', 'N/A')  # 라벨 ID
+                                class_name = id2label.get(label_id, str(label_id)).split()[0]  # 클래스 이름
+                                mouse_segment_info = {  # 마우스 세그먼트 정보 저장
+                                    'class_name': class_name,
+                                    'id': closest_seg_id,
+                                    'depth': closest_depth
+                                }
+                                break  # 찾았으면 종료
+                        else:  # 세그먼트 정보를 찾지 못했으면
+                            mouse_segment_info = None  # 정보 없음
+                    else:  # 세그먼트가 없으면
+                        mouse_segment_info = None  # 정보 없음
+                else:  # 범위 밖이면
+                    mouse_segment_info = None  # 정보 없음
+            else:  # 데이터가 없으면
+                mouse_segment_info = None  # 정보 없음
+            
+            # 시각화 업데이트 (마우스 정보 표시)
+            if current_seg_map is not None:  # 세그멘테이션 맵이 있으면
+                _, current_seg_map_resized, current_depth_map_resized, current_vanishing_point = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
+                                         is_thing_map, current_depth_map, current_filename, 
+                                         current_seg_time, current_depth_time, show_depth_mode, 
+                                         show_3d_boxes, selected_segment_id, mouse_x, mouse_y, mouse_segment_info,
+                                         show_face_instances)  # 시각화
+        elif event == cv2.EVENT_RBUTTONDOWN:  # 오른쪽 버튼 클릭
+            selected_segment_id = None  # 선택 해제 (모든 인스턴스 표시)
+            print("🖱️ 모든 인스턴스 표시")  # 모든 인스턴스 표시 메시지 출력
+            # 시각화 업데이트
+            if current_seg_map is not None:  # 세그멘테이션 맵이 있으면
+                _, current_seg_map_resized, current_depth_map_resized, current_vanishing_point = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
+                                         is_thing_map, current_depth_map, current_filename, 
+                                         current_seg_time, current_depth_time, show_depth_mode, 
+                                         show_3d_boxes, selected_segment_id, mouse_x, mouse_y, mouse_segment_info,
+                                         show_face_instances)  # 시각화
+        elif event == cv2.EVENT_LBUTTONDOWN:  # 왼쪽 버튼 클릭
+            if current_seg_map_resized is not None:  # 세그멘테이션 맵이 있으면
+                # 클릭한 위치의 세그먼트 ID 찾기
+                if 0 <= y < current_seg_map_resized.shape[0] and 0 <= x < current_seg_map_resized.shape[1]:  # 범위 내이면
+                    clicked_id = int(current_seg_map_resized[y, x])  # 클릭한 위치의 세그먼트 ID
+                    
+                    if clicked_id == 0:  # 배경이면
+                        selected_segment_id = None  # 선택 해제
+                        print("🖱️ 선택 해제")  # 선택 해제 메시지 출력
+                    else:  # 세그먼트가 있으면
+                        # 클릭한 위치 주변의 모든 세그먼트 찾기 (겹쳐있는 경우)
+                        # 주변 영역에서 세그먼트 찾기
+                        search_radius = 5  # 검색 반경
+                        y_min = max(0, y - search_radius)  # Y 최소값
+                        y_max = min(current_seg_map_resized.shape[0], y + search_radius + 1)  # Y 최대값
+                        x_min = max(0, x - search_radius)  # X 최소값
+                        x_max = min(current_seg_map_resized.shape[1], x + search_radius + 1)  # X 최대값
+                        
+                        nearby_segments = set()  # 주변 세그먼트 집합
+                        for py in range(y_min, y_max):  # Y 범위
+                            for px in range(x_min, x_max):  # X 범위
+                                seg_id = int(current_seg_map_resized[py, px])  # 세그먼트 ID
+                                if seg_id != 0:  # 배경이 아니면
+                                    nearby_segments.add(seg_id)  # 세그먼트 추가
+                        
+                        if len(nearby_segments) > 0:  # 주변 세그먼트가 있으면
+                            # 각 세그먼트의 정보 수집
+                            segment_info_list = []  # 세그먼트 정보 리스트
+                            for seg_id in nearby_segments:  # 각 세그먼트에 대해
+                                # 세그먼트 정보 찾기
+                                seg_info = None  # 세그먼트 정보
+                                for s in current_segments_info:  # 각 세그먼트에 대해
+                                    if s['id'] == seg_id:  # ID가 일치하면
+                                        seg_info = s  # 정보 저장
+                                        break  # 찾았으면 종료
+                                
+                                if seg_info is None:  # 정보를 찾지 못했으면
+                                    continue  # 건너뛰기
+                                
+                                # 세그먼트 중심점 계산
+                                mask = (current_seg_map_resized == seg_id)  # 세그먼트 마스크
+                                y_coords, x_coords = np.where(mask)  # 마스크 영역의 좌표
+                                if len(y_coords) > 0 and len(x_coords) > 0:  # 좌표가 있으면
+                                    center_x = int(x_coords.mean())  # 중심 X
+                                    center_y = int(y_coords.mean())  # 중심 Y
+                                    
+                                    # 소실점과의 거리 계산
+                                    if current_vanishing_point is not None:  # 소실점이 있으면
+                                        vp_x, vp_y = current_vanishing_point  # 소실점 좌표
+                                        # 유클리드 거리 계산
+                                        distance_to_vp = np.sqrt((center_x - vp_x)**2 + (center_y - vp_y)**2)  # 소실점과의 거리
+                                    else:  # 소실점이 없으면
+                                        distance_to_vp = 0.0  # 거리 0
+                                    
+                                    segment_info_list.append({  # 세그먼트 정보 추가
+                                        'id': seg_id,
+                                        'label_id': seg_info.get('label_id', 'N/A'),
+                                        'center_x': center_x,
+                                        'center_y': center_y,
+                                        'distance_to_vp': distance_to_vp,
+                                        'area': len(y_coords)  # 면적
+                                    })
+                            
+                            if len(segment_info_list) > 0:  # 세그먼트 정보가 있으면
+                                # 같은 클래스(label_id)끼리 그룹화
+                                label_groups = {}  # 클래스별 그룹
+                                for seg_info in segment_info_list:  # 각 세그먼트에 대해
+                                    label_id = seg_info['label_id']  # 라벨 ID
+                                    if label_id not in label_groups:  # 그룹이 없으면
+                                        label_groups[label_id] = []  # 그룹 생성
+                                    label_groups[label_id].append(seg_info)  # 세그먼트 추가
+                                
+                                # 같은 클래스가 여러 개 있으면 소실점에서 멀리 떨어진 것 우선
+                                # 그렇지 않으면 면적이 작은 것 우선
+                                if len(segment_info_list) == 1:  # 세그먼트가 1개면
+                                    selected_segment_id = segment_info_list[0]['id']  # 선택
+                                else:  # 여러 개면
+                                    # 같은 클래스가 여러 개 있는지 확인
+                                    same_label_segments = []  # 같은 클래스 세그먼트 리스트
+                                    for label_id, segs in label_groups.items():  # 각 클래스에 대해
+                                        if len(segs) > 1:  # 같은 클래스가 2개 이상이면
+                                            same_label_segments.extend(segs)  # 추가
+                                    
+                                    if len(same_label_segments) > 1:  # 같은 클래스가 여러 개면
+                                        # 소실점에서 멀리 떨어진 것 우선 정렬 (내림차순)
+                                        same_label_segments.sort(key=lambda x: x['distance_to_vp'], reverse=True)  # 거리 기준 정렬
+                                        selected_segment_id = same_label_segments[0]['id']  # 가장 먼 것 선택
+                                    else:  # 같은 클래스가 여러 개가 아니면
+                                        # 면적이 작은 것 우선 정렬
+                                        segment_info_list.sort(key=lambda x: x['area'])  # 면적 기준 정렬
+                                        selected_segment_id = segment_info_list[0]['id']  # 가장 작은 것 선택
+                                
+                                # 세그먼트 정보 출력
+                                for seg_info in segment_info_list:  # 각 세그먼트에 대해
+                                    if seg_info['id'] == selected_segment_id:  # 선택된 ID와 같으면
+                                        label_id = seg_info['label_id']  # 라벨 ID
+                                        score = None  # 신뢰도
+                                        for s in current_segments_info:  # 각 세그먼트에 대해
+                                            if s['id'] == selected_segment_id:  # ID가 일치하면
+                                                score = s.get('score', 0.0)  # 신뢰도
+                                                break  # 찾았으면 종료
+                                        area = seg_info['area']  # 면적
+                                        distance = seg_info['distance_to_vp']  # 소실점 거리
+                                        print(f"🖱️ 세그먼트 선택: ID={selected_segment_id}, Label={label_id}, Score={score:.2f if score is not None else 'N/A'}, Area={area}, VP_Dist={distance:.1f}")  # 선택 메시지 출력
+                                        break  # 찾았으면 종료
+                        else:  # 주변 세그먼트가 없으면
+                            selected_segment_id = clicked_id  # 클릭한 ID 선택
+                            print(f"🖱️ 세그먼트 선택: ID={clicked_id}")  # 선택 메시지 출력
+                    
+                    # 시각화 업데이트
+                    if current_seg_map is not None:  # 세그멘테이션 맵이 있으면
+                        _, current_seg_map_resized, current_depth_map_resized, current_vanishing_point = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
+                                         is_thing_map, current_depth_map, current_filename, 
+                                         current_seg_time, current_depth_time, show_depth_mode, 
+                                         show_3d_boxes, selected_segment_id, mouse_x, mouse_y, mouse_segment_info,
+                                         show_face_instances)  # 시각화
+    
+    # 마우스 콜백 등록
+    window_name = "OneFormer + Depth - Panoptic Segmentation"  # 윈도우 이름
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)  # 윈도우 생성
+    cv2.setMouseCallback(window_name, mouse_callback)  # 마우스 콜백 등록
+    
+    # 첫 번째 이미지 추론
+    result = run_inference(cur_idx, processor, segmentation_model, depth_estimator, device,
+                 id2label, is_thing_map, image_files)  # 첫 번째 이미지 추론
+    if result is not None:  # 결과가 있으면
+        current_seg_map, current_segments_info, current_depth_map, current_img_bgr, \
+        current_filename, current_seg_time, current_depth_time = result  # 결과 저장
+        # 현재 모드에 맞게 시각화
+        _, current_seg_map_resized, current_depth_map_resized, current_vanishing_point = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
+                         is_thing_map, current_depth_map, current_filename, 
+                         current_seg_time, current_depth_time, show_depth_mode, 
+                         show_3d_boxes, selected_segment_id, mouse_x, mouse_y, mouse_segment_info,
+                         show_face_instances)  # 시각화
+
+    print("\n키: A/← (이전), D/→ (다음), S (모드 전환), E (3D 박스), F (Face Instance), Q (종료)")  # 사용법 안내 출력
+    print("마우스: 이동 (정보 표시), 왼쪽 클릭 (세그먼트 선택), 우클릭 (모든 인스턴스 표시)")  # 마우스 사용법 안내 출력
+
+    while True:  # 무한 루프
+        key = cv2.waitKey(1) & 0xFF  # 키 입력 대기 (1ms로 변경하여 마우스 이벤트 처리)
+        if key == ord('a') or key == 0x250000:  # 'a' 또는 왼쪽 화살표 키
+            cur_idx = (cur_idx - 1) % len(image_files)  # 이전 이미지로 이동
+            result = run_inference(cur_idx, processor, segmentation_model, depth_estimator, device,
+                         id2label, is_thing_map, image_files)  # 추론 수행
+            if result is not None:  # 결과가 있으면
+                current_seg_map, current_segments_info, current_depth_map, current_img_bgr, \
+                current_filename, current_seg_time, current_depth_time = result  # 결과 저장
+                selected_segment_id = None  # 이미지 변경 시 선택 해제
+                # 현재 모드에 맞게 시각화
+                _, current_seg_map_resized, current_depth_map_resized, current_vanishing_point = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
+                                 is_thing_map, current_depth_map, current_filename, 
+                                 current_seg_time, current_depth_time, show_depth_mode, 
+                                 show_3d_boxes, selected_segment_id, mouse_x, mouse_y, mouse_segment_info,
+                                 show_face_instances)  # 시각화
+        elif key == ord('d') or key == 0x270000:  # 'd' 또는 오른쪽 화살표 키
+            cur_idx = (cur_idx + 1) % len(image_files)  # 다음 이미지로 이동
+            result = run_inference(cur_idx, processor, segmentation_model, depth_estimator, device,
+                         id2label, is_thing_map, image_files)  # 추론 수행
+            if result is not None:  # 결과가 있으면
+                current_seg_map, current_segments_info, current_depth_map, current_img_bgr, \
+                current_filename, current_seg_time, current_depth_time = result  # 결과 저장
+                selected_segment_id = None  # 이미지 변경 시 선택 해제
+                # 현재 모드에 맞게 시각화
+                _, current_seg_map_resized, current_depth_map_resized, current_vanishing_point = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
+                                 is_thing_map, current_depth_map, current_filename, 
+                                 current_seg_time, current_depth_time, show_depth_mode, 
+                                 show_3d_boxes, selected_segment_id, mouse_x, mouse_y, mouse_segment_info,
+                                 show_face_instances)  # 시각화
+        elif key == ord('s'):  # 's' 키 - 모드 전환
+            show_depth_mode = not show_depth_mode  # 모드 토글
+            if current_seg_map is not None:  # 추론 결과가 있으면
+                mode_name = "Depth Map 모드" if show_depth_mode else "Segmentation 모드"  # 모드 이름
+                print(f"🔄 모드 전환: {mode_name}")  # 모드 전환 메시지 출력
+                # 현재 모드에 맞게 시각화
+                _, current_seg_map_resized, current_depth_map_resized, current_vanishing_point = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
+                                 is_thing_map, current_depth_map, current_filename, 
+                                 current_seg_time, current_depth_time, show_depth_mode, 
+                                 show_3d_boxes, selected_segment_id, mouse_x, mouse_y, mouse_segment_info,
+                                 show_face_instances)  # 시각화
+            else:  # 추론 결과가 없으면
+                print("⚠️ 먼저 이미지를 로드하세요.")  # 경고 메시지 출력
+        elif key == ord('e'):  # 'e' 키 - 3D 박스 토글
+            show_3d_boxes = not show_3d_boxes  # 3D 박스 표시 토글
+            if current_seg_map is not None:  # 추론 결과가 있으면
+                box_status = "ON" if show_3d_boxes else "OFF"  # 박스 상태
+                print(f"📦 3D 박스: {box_status}")  # 박스 상태 메시지 출력
+                # 현재 모드에 맞게 시각화
+                _, current_seg_map_resized, current_depth_map_resized, current_vanishing_point = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
+                                 is_thing_map, current_depth_map, current_filename, 
+                                 current_seg_time, current_depth_time, show_depth_mode, 
+                                 show_3d_boxes, selected_segment_id, mouse_x, mouse_y, mouse_segment_info,
+                                 show_face_instances)  # 시각화
+            else:  # 추론 결과가 없으면
+                print("⚠️ 먼저 이미지를 로드하세요.")  # 경고 메시지 출력
+        elif key == ord('f'):  # 'f' 키 - Face Instance 토글
+            show_face_instances = not show_face_instances  # Face Instance 표시 토글
+            if current_seg_map is not None:  # 추론 결과가 있으면
+                face_status = "ON" if show_face_instances else "OFF"  # Face 상태
+                print(f"🎭 Face Instance: {face_status}")  # Face 상태 메시지 출력
+                # 현재 모드에 맞게 시각화
+                _, current_seg_map_resized, current_depth_map_resized, current_vanishing_point = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
+                                 is_thing_map, current_depth_map, current_filename, 
+                                 current_seg_time, current_depth_time, show_depth_mode, 
+                                 show_3d_boxes, selected_segment_id, mouse_x, mouse_y, mouse_segment_info,
+                                 show_face_instances)  # 시각화
+            else:  # 추론 결과가 없으면
+                print("⚠️ 먼저 이미지를 로드하세요.")  # 경고 메시지 출력
+        elif key == ord('q'):  # 'q' 키
+            print("\n👋 종료")  # 종료 메시지 출력
+            break  # 루프 종료
+    cv2.destroyAllWindows()  # 모든 윈도우 닫기
+
+
+if __name__ == "__main__":  # 스크립트가 직접 실행될 때
+    main()  # 메인 함수 실행
