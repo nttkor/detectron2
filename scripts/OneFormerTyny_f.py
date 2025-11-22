@@ -1,6 +1,6 @@
 """
 OneFormer Panoptic Segmentation - Interactive Visualization Tool
-Thing/Stuff 수동 분류 + 신뢰도 표시
+ADE20K 공식 Thing/Stuff 분류 (CSAILVision MIT) + 신뢰도 표시
 """
 
 import os
@@ -10,7 +10,6 @@ import cv2
 import time
 import numpy as np
 from transformers import OneFormerProcessor, OneFormerForUniversalSegmentation
-from ade20k_thing_stuff_map import ADE20K_THING_STUFF_CLASSES
 
 def visualize_cv2_all(img_bgr, seg_map, segments_info, id2label, is_thing_map, filename, inference_time):
     """Panoptic Segmentation 결과 시각화"""
@@ -144,13 +143,15 @@ model = OneFormerForUniversalSegmentation.from_pretrained(model_name)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
-id2label = model.config.id2label
+# ADE20K 공식 Thing/Stuff 분류 및 클래스 이름 사용
+from ade20k_thing_stuff_map import ADE20K_THING_STUFF_CLASSES, ADE20K_CLASS_NAMES
 
-# Thing/Stuff 수동 분류 사용
 is_thing_map = ADE20K_THING_STUFF_CLASSES
+id2label = ADE20K_CLASS_NAMES  # 공식 클래스 이름 사용
+
 thing_count = sum(1 for v in is_thing_map.values() if v)
 stuff_count = sum(1 for v in is_thing_map.values() if not v)
-print(f"✓ ADE20K 수동 Thing/Stuff 분류 사용")
+print(f"✓ ADE20K 공식 Thing/Stuff 분류 사용 (CSAILVision MIT)")
 print(f"  - Thing: {thing_count}개 클래스")
 print(f"  - Stuff: {stuff_count}개 클래스")
 
