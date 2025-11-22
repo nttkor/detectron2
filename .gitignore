@@ -1,3 +1,5 @@
+# data
+ade20k_consistency
 data/
 images/
 labels/
@@ -152,15 +154,20 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
+# 1. Virtual Environment Directories
+# 프로젝트 루트에 위치한 일반적인 가상 환경 폴더들을 무시합니다.
+# /를 사용하여 프로젝트 루트만 지정 (서브 디렉토리의 동일 이름 폴더는 무시하지 않음)
+/venv
+/env
+/d2env
+/.venv
+/ENV
+
+# 2. Environment Configuration Files
+# 보안상 민감한 환경 변수 파일들을 무시합니다.
 .env
+.env.*
 .envrc
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
 
 # Spyder project settings
 .spyderproject
