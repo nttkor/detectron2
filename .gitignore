@@ -1,5 +1,7 @@
 # data
-ade20k_consistency
+ade20k_consistency/
+detectron2/
+detectron2_repo/
 data/
 images/
 labels/
