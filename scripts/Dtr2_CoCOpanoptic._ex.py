@@ -1,86 +1,127 @@
-# 코드 구조 분석
-# 1. 프로그램 목적
-# Detectron2의 COCO Panoptic Segmentation 모델로 이미지를 추론하고, 4가지 시각화 모드로 결과를 표시하는 인터랙티브 뷰어입니다.
-# 2. 주요 기능
-# 시각화 모드 (4가지)
-# 모드 0: Panoptic Segmentation — Visualizer.draw_panoptic_seg_predictions() 사용 (Thing + Stuff 모두 표시)
-# 모드 1: Instance Segmentation — Visualizer.draw_instance_predictions() 사용 (Thing만 표시, instances가 없으면 panoptic_seg 사용)
-# 모드 2: Semantic Segmentation — Visualizer.draw_sem_seg() 사용 (sem_seg가 있으면 사용, 없으면 panoptic_seg에서 추출)
-# 모드 3: Contour Visualization — 원본 이미지에 각 세그먼트별 윤곽선과 클래스명 표시 (Thing + Stuff 모두 표시, 클래스별 다른 색상)
-# 인터랙티브 조작
-# A/←: 이전 이미지
-# D/→: 다음 이미지
-# S: 시각화 모드 전환 (이미지 유지, 모드만 변경)
-# Q/ESC: 종료
-# 3. 코드 구조
-# 상수 및 설정
-# IMAGE_DIR = "..."              # 이미지 디렉토리 경로
-# MODEL_YAML = "..."             # 모델 설정 파일
-# TARGET_WIN_HEIGHT = 800        # 윈도우 높이 고정값
-# SCALE_THRESHOLD = 512          # Visualizer 스케일 조정 기준
-# VIZ_MODES = [...]              # 시각화 모드 이름 리스트 (4개)
-# 핵심 함수들
-# setup_model()
-# Detectron2 모델 로드
-# Predictor와 메타데이터 초기화
-# GPU/CPU 자동 선택
-# get_image_files()
-# 지정된 디렉토리에서 JPG 이미지 파일 목록 수집 (JPG만 지원)
-# visualize_output_by_mode()
-# 모드에 따라 시각화 수행
-# 모드 0: Visualizer.draw_panoptic_seg_predictions() 사용
-# 모드 1: Visualizer.draw_instance_predictions() 사용 (instances가 없으면 panoptic_seg 사용)
-# 모드 2: Visualizer.draw_sem_seg() 사용 (sem_seg shape 변환 처리: (C,H,W) -> (H,W))
-# 모드 3 (Contour): 각 세그먼트별로 윤곽선과 클래스명을 원본 이미지에 그리기
-# overlay_window_info()
-# 좌측: 파일 정보
-# 중앙: 현재 모드 이름
-# 우측: 추론 시간
-# 폰트: cv2.getFontScaleFromHeight()로 12px 높이 고정, 두께 1, 고정값 사용
-# show_result_in_window()
-# 윈도우 높이를 800px로 고정
-# 너비는 원본 비율 유지
-# 오버레이는 imshow 전에 처리
-# 4. 메인 실행 흐름
-# 1. 모델 및 이미지 파일 로드
-# 2. 초기 이미지 추론 수행
-# 3. 무한 루프:
-#    - 현재 모드로 시각화
-#    - 정보 오버레이 추가 (imshow 전에 처리)
-#    - 윈도우에 표시
-#    - 키 입력 대기
-#    - 입력에 따라:
-#      * A/D: 이미지 변경 (추론 재수행)
-#      * S: 모드만 변경 (추론 결과 재사용)
-#      * Q: 종료
-# 5. 최적화 포인트
-# 추론 결과 재사용: S 키로 모드 전환 시 추론을 다시 하지 않고 저장된 current_outputs 재사용
-# 추론 시간 저장: current_inference_time에 저장하여 모드 전환 시에도 동일한 시간 표시
-# 메모리 관리: .copy()로 메모리 연속성 보장
-# 6. 특징
-# 윈도우 크기 고정: 높이 800px, 비율 유지
-# 4가지 시각화 모드: Panoptic, Instance, Semantic, Contour
-# 효율적인 모드 전환: 이미지 변경 없이 모드만 전환 가능
-# 안전한 종료: 윈도우 X 버튼 감지 및 키 입력 처리
-# 7. 작업 내역
-# - 초기 구현: Detectron2 Tutorial 기반 panoptic segmentation 추론 및 시각화
-# - 모드 확장: 3가지 모드에서 4가지 모드로 확장 (Panoptic, Instance, Semantic, Contour)
-# - Instance Segmentation 모드: outputs["instances"] 사용, 없으면 panoptic_seg 사용
-# - Semantic Segmentation 모드: outputs["sem_seg"] 사용, shape 변환 처리 ((C,H,W) -> (H,W) via argmax)
-# - Contour 모드 개선:
-#   * 전체 이진 마스크 대신 각 세그먼트별로 윤곽선을 그려 모든 세그먼트가 정확히 표시되도록 개선
-#   * 클래스별 다른 색상 적용 (category_id 기반 HSV 색상 생성)
-#   * 각 세그먼트 중심점에 클래스명 표시 추가
-#   * Thing은 파란색 배경, Stuff는 검정색 배경으로 구분
-# - 이미지 로딩: JPG 파일만 읽도록 필터링 (get_image_files 함수)
-# - 폰트 설정 개선:
-#   * cv2.getFontScaleFromHeight() 사용하여 12px 높이 고정
-#   * 폰트 두께 1로 설정
-#   * 이미지 해상도와 무관하게 고정값 사용
-#   * cv2.LINE_AA 안티앨리어싱 적용
-# - 오버레이 처리 순서 개선: 추론 → 시각화 → 오버레이 → imshow 순서로 명확히 분리
-# - 오버레이 함수: 원본 이미지를 수정하지 않고 복사본에 텍스트 추가
-# 이 코드는 추론 결과를 재사용해 모드 전환을 빠르게 하고, 사용자 인터페이스를 제공합니다.
+"""
+코드 구조 분석
+1. 프로그램 목적
+Detectron2의 COCO Panoptic Segmentation 모델로 이미지를 추론하고, 4가지 시각화 모드로 결과를 표시하는 인터랙티브 뷰어입니다.
+2. 주요 기능
+시각화 모드 (4가지)
+모드 0: Panoptic Segmentation — Visualizer.draw_panoptic_seg_predictions() 사용 (Thing + Stuff 모두 표시)
+모드 1: Instance Segmentation — Visualizer.draw_instance_predictions() 사용 (Thing만 표시, instances가 없으면 panoptic_seg 사용)
+모드 2: Semantic Segmentation — Visualizer.draw_sem_seg() 사용 (sem_seg가 있으면 사용, 없으면 panoptic_seg에서 추출)
+모드 3: Contour Visualization — 원본 이미지에 각 세그먼트별 윤곽선과 클래스명 표시 (Thing + Stuff 모두 표시, 클래스별 다른 색상)
+인터랙티브 조작
+A/←: 이전 이미지
+D/→: 다음 이미지
+S: 시각화 모드 전환 (이미지 유지, 모드만 변경)
+Q/ESC: 종료
+3. 코드 구조
+상수 및 설정
+IMAGE_DIR = "..."              # 이미지 디렉토리 경로
+MODEL_YAML = "..."             # 모델 설정 파일
+TARGET_WIN_HEIGHT = 800        # 윈도우 높이 고정값
+SCALE_THRESHOLD = 512          # Visualizer 스케일 조정 기준
+VIZ_MODES = [...]              # 시각화 모드 이름 리스트 (4개)
+핵심 함수들
+setup_model()
+Detectron2 모델 로드
+Predictor와 메타데이터 초기화
+GPU/CPU 자동 선택
+get_image_files()
+지정된 디렉토리에서 JPG 이미지 파일 목록 수집 (JPG만 지원)
+visualize_output_by_mode()
+모드에 따라 시각화 수행
+모드 0: Visualizer.draw_panoptic_seg_predictions() 사용
+모드 1: Visualizer.draw_instance_predictions() 사용 (instances가 없으면 panoptic_seg 사용)
+모드 2: Visualizer.draw_sem_seg() 사용 (sem_seg shape 변환 처리: (C,H,W) -> (H,W))
+모드 3 (Contour): 각 세그먼트별로 윤곽선과 클래스명을 원본 이미지에 그리기
+overlay_window_info()
+좌측: 파일 정보
+중앙: 현재 모드 이름
+우측: 추론 시간
+폰트: cv2.getFontScaleFromHeight()로 12px 높이 고정, 두께 1, 고정값 사용
+show_result_in_window()
+윈도우 높이를 800px로 고정
+너비는 원본 비율 유지
+오버레이는 imshow 전에 처리
+4. 메인 실행 흐름
+1. 모델 및 이미지 파일 로드
+2. 초기 이미지 추론 수행
+3. 무한 루프:
+   - 현재 모드로 시각화
+   - 정보 오버레이 추가 (imshow 전에 처리)
+   - 윈도우에 표시
+   - 키 입력 대기
+   - 입력에 따라:
+     * A/D: 이미지 변경 (추론 재수행)
+     * S: 모드만 변경 (추론 결과 재사용)
+     * Q: 종료
+5. 최적화 포인트
+추론 결과 재사용: S 키로 모드 전환 시 추론을 다시 하지 않고 저장된 current_outputs 재사용
+추론 시간 저장: current_inference_time에 저장하여 모드 전환 시에도 동일한 시간 표시
+메모리 관리: .copy()로 메모리 연속성 보장
+6. 특징
+윈도우 크기 고정: 높이 800px, 비율 유지
+4가지 시각화 모드: Panoptic, Instance, Semantic, Contour
+효율적인 모드 전환: 이미지 변경 없이 모드만 전환 가능
+안전한 종료: 윈도우 X 버튼 감지 및 키 입력 처리
+7. 작업 내역
+- 초기 구현: Detectron2 Tutorial 기반 panoptic segmentation 추론 및 시각화
+- 모드 확장: 3가지 모드에서 4가지 모드로 확장 (Panoptic, Instance, Semantic, Contour)
+- Instance Segmentation 모드: outputs["instances"] 사용, 없으면 panoptic_seg 사용
+- Semantic Segmentation 모드: outputs["sem_seg"] 사용, shape 변환 처리 ((C,H,W) -> (H,W) via argmax)
+- Contour 모드 개선:
+  * 전체 이진 마스크 대신 각 세그먼트별로 윤곽선을 그려 모든 세그먼트가 정확히 표시되도록 개선
+  * 클래스별 다른 색상 적용 (category_id 기반 HSV 색상 생성)
+  * 각 세그먼트 중심점에 클래스명 표시 추가
+  * Thing은 파란색 배경, Stuff는 검정색 배경으로 구분
+- 이미지 로딩: JPG 파일만 읽도록 필터링 (get_image_files 함수)
+- 폰트 설정 개선:
+  * cv2.getFontScaleFromHeight() 사용하여 12px 높이 고정
+  * 폰트 두께 1로 설정
+  * 이미지 해상도와 무관하게 고정값 사용
+  * cv2.LINE_AA 안티앨리어싱 적용
+- 오버레이 처리 순서 개선: 추론 → 시각화 → 오버레이 → imshow 순서로 명확히 분리
+- 오버레이 함수: 원본 이미지를 수정하지 않고 복사본에 텍스트 추가
+이 코드는 추론 결과를 재사용해 모드 전환을 빠르게 하고, 사용자 인터페이스를 제공합니다.
+
+================================================================================
+id / class name 불일치 문제 정리 (2025-11-27)
+================================================================================
+
+1. 문제 현상
+   - ADE20K 이미지에 COCO panoptic 모델(panoptic_fpn_R_101_3x)을 적용했을 때,
+     사람이 보기엔 bed, chair, table, car처럼 보이는데
+     라벨은 potted plant, cake, bed, bicycle 등 COCO panoptic 이름으로 표시되었다.
+   - 특히 COCO 80-클래스 detection 기준으로 기억하고 있는 id 표(예: 56=chair, 59=bed, 60=dining table)와
+     COCO Panoptic 133-클래스 id 표가 달라서, id는 맞는데 이름이 이상하게 느껴지는 문제가 있었다.
+
+2. 원인 분석
+   - Detectron2 panoptic 모델은 COCO Panoptic(133 클래스)용 category_id를 사용한다.
+     * 예: 56=cake, 59=potted plant, 60=bed, 61=dining table, 24=backpack, 2=bicycle ...
+   - 이 스크립트는 `outputs["panoptic_seg"]`의 segments_info.category_id / isthing과
+     MetadataCatalog의 thing_class_id / stuff_class_id를 그대로 사용하므로,
+     "모델 기준"으로는 id→이름 매핑이 정확하다.
+   - 사용자가 기대한 것은 COCO-80 detection 스타일의 이름(id=56→chair, 60→table, 2→car, 24→backpack, 61→toilet 등)이라
+     두 개의 id/name 맵이 섞여 보인 것이 문제의 본질이었다.
+
+3. 해결 방법
+   - 추론 id(category_id)와 isthing 값은 그대로 유지하고, 시각화에 사용되는 "표시용 클래스 이름"만 별도 맵으로 보정한다.
+   - Contour 모드 및 디버그 출력에서 사용하는 `get_class_name_from_segment(seg_info, metadata)`에서:
+     a) 먼저 MetadataCatalog를 사용해 COCO Panoptic 공식 이름을 계산
+        - Thing: thing_class_id / thing_classes
+        - Stuff: stuff_class_id / stuff_classes
+     b) 이름이 없으면 `id_<category_id>` 형태로 fallback
+     c) 마지막에 `CUSTOM_CLASS_NAME_MAP[category_id]`가 있으면 그 값으로 한 번 더 오버라이드
+   - 이렇게 하면:
+     - id와 isthing은 항상 모델 출력 그대로 유지
+     - 이름만 사용자 정의 표에 맞게 "chair", "table", "car", "backpack", "toilet" 등으로 보정된다.
+
+4. 현재 매핑 규칙 요약
+   - id는 항상 segments_info["category_id"] (COCO Panoptic 기준)를 그대로 표시한다.
+   - 이름은 다음 우선순위로 결정된다.
+     1) MetadataCatalog 기반 COCO Panoptic 공식 이름
+     2) 없으면 "id_<category_id>"
+     3) 마지막으로 CUSTOM_CLASS_NAME_MAP에 등록된 이름(사용자 정의 COCO-80 스타일 이름)으로 오버라이드
+"""
 # ====================================================
 # 필수 라이브러리 임포트 (Import Libraries)
 # ====================================================
@@ -106,6 +147,17 @@ from detectron2.engine import DefaultPredictor           # 기본 모델 추론�
 from detectron2.utils.logger import setup_logger         # Detectron2 로깅 시스템 설정
 from detectron2.data import MetadataCatalog              # 데이터셋의 클래스 이름, 색상 등 메타데이터 접근
 from detectron2.utils.visualizer import Visualizer, ColorMode  # 추론 결과를 이미지 위에 시각화 (인스턴스/팬옵틱)
+
+# COCO → 사용자 정의 클래스 이름 오버라이드 맵
+# 사용자가 원하는 COCO-80 스타일 이름으로 표시하기 위한 매핑
+# (category_id: 원하는 표시 이름)
+CUSTOM_CLASS_NAME_MAP = {
+    24: "backpack",
+    60: "table",
+    56: "chair",
+    61: "toilet",
+    2: "car",
+}
 
 # ====================================================
 # 1. 상수 및 설정 정의 (Configuration)
@@ -242,8 +294,11 @@ def visualize_output_by_mode(original_img_bgr, outputs, metadata, viz_scale, viz
                 else:
                     if 0 <= cat_id < len(metadata.stuff_classes):
                         class_name = metadata.stuff_classes[cat_id]
-            
-            return class_name if class_name else f"id_{cat_id}"
+
+            # 기본 COCO 이름이 없으면 id_표기 사용
+            class_name = class_name if class_name else f"id_{cat_id}"
+            # 최종적으로 사용자 정의 이름으로 한 번 더 오버라이드
+            return CUSTOM_CLASS_NAME_MAP.get(cat_id, class_name)
         
         # 6. 각 세그먼트별로 윤곽선 그리기 및 클래스명 표시 (모든 Thing과 Stuff 포함, 클래스별 다른 색상)
         unique_ids = np.unique(panoptic_seg)
@@ -484,15 +539,42 @@ def main():
             print(f"  - device: {panoptic_seg.device if hasattr(panoptic_seg, 'device') else 'N/A'}")
             print(f"  - unique values count: {len(torch.unique(panoptic_seg)) if hasattr(torch, 'unique') else 'N/A'}")
             
-            print(f"\n[DEBUG] segments_info:")
+            # segments_info 전체를 id:name 형식으로 출력
+            print(f"\n[DEBUG] segments_info (id:name):")
             print(f"  - type: {type(segments_info)}")
             print(f"  - length: {len(segments_info)}")
-            if len(segments_info) > 0:
-                print(f"  - sample (first 3):")
-                for i, seg in enumerate(segments_info[:3]):
-                    print(f"    [{i}] {seg}")
-                if len(segments_info) > 3:
-                    print(f"    ... (total {len(segments_info)} segments)")
+            for i, seg in enumerate(segments_info):
+                cat_id = seg.get("category_id", seg.get("label_id", -1))
+                is_thing = seg.get("isthing", False)
+
+                class_name = None
+                if is_thing and hasattr(metadata, "thing_classes"):
+                    if hasattr(metadata, "thing_class_id"):
+                        try:
+                            class_idx = metadata.thing_class_id.index(cat_id)
+                            class_name = metadata.thing_classes[class_idx]
+                        except (ValueError, AttributeError):
+                            class_name = None
+                    else:
+                        if cat_id == 0 and len(metadata.thing_classes) > 0:
+                            class_name = metadata.thing_classes[0]
+                        elif 1 <= cat_id <= len(metadata.thing_classes):
+                            class_name = metadata.thing_classes[cat_id - 1]
+                elif (not is_thing) and hasattr(metadata, "stuff_classes"):
+                    if hasattr(metadata, "stuff_class_id"):
+                        try:
+                            class_idx = metadata.stuff_class_id.index(cat_id)
+                            class_name = metadata.stuff_classes[class_idx]
+                        except (ValueError, AttributeError):
+                            class_name = None
+                    else:
+                        if 0 <= cat_id < len(metadata.stuff_classes):
+                            class_name = metadata.stuff_classes[cat_id]
+
+                if class_name is None:
+                    class_name = f"id_{cat_id}"
+
+                print(f"    [{i}] id:{cat_id} name:{class_name} (isthing={is_thing})")
         
         return True # 로드 및 추론 성공 시
 

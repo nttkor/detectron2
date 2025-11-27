@@ -676,7 +676,7 @@ def draw_horizontal_plane(img, segment_mask, color, thickness=1):
         cv2.drawContours(img, [largest_contour], -1, color, thickness)  # 외곽선 그리기
 
 
-def draw_wall_structure(img, bbox_2d, depth_map, segment_mask, all_segments_info, seg_map_resized, color, thickness=2):
+def draw_wall_structure(img, bbox_2d, depth_map, segment_mask, all_segments_info, seg_map_resized, color, thickness=2, vanishing_point=None):
     """
     벽 구조를 그립니다 (수직 평면, floor/ceiling과 만나는 곳에서 수직선으로 분리).
     
@@ -756,7 +756,7 @@ def draw_wall_structure(img, bbox_2d, depth_map, segment_mask, all_segments_info
                         draw_line_in_mask(img, (int(x), intersection_y), (int(x), wall_bottom), segment_mask, color, thickness)  # 선 그리기
 
 
-def draw_table_bed_cube(img, bbox_2d, depth_map, segment_mask, color, thickness=2):
+def draw_table_bed_cube(img, bbox_2d, depth_map, segment_mask, color, thickness=2, vanishing_point=None):
     """
     테이블/침대 구조를 그립니다 (직육면체, 퍼스펙티브 9개 선).
     
@@ -767,6 +767,7 @@ def draw_table_bed_cube(img, bbox_2d, depth_map, segment_mask, color, thickness=
         segment_mask (numpy.ndarray): 세그먼트 마스크
         color (tuple): 색상
         thickness (int): 선 두께
+        vanishing_point (tuple, optional): 소실점 (x, y), None이면 중심 사용
     """
     x_min, y_min, x_max, y_max = bbox_2d  # 바운딩 박스
     
@@ -784,19 +785,42 @@ def draw_table_bed_cube(img, bbox_2d, depth_map, segment_mask, color, thickness=
     front_top_right = (x_max, y_min)  # 오른쪽 위
     front_top_left = (x_min, y_min)  # 왼쪽 위
     
-    # 뒷면 4개 정점 (원근 효과)
-    perspective_scale = 0.75  # 원근 축소 비율
-    center_x = (x_min + x_max) / 2  # 중심 X
-    center_y = (y_min + y_max) / 2  # 중심 Y
+    # [개선] 실제 소실점 또는 이미지 중심 사용
+    if vanishing_point is not None:  # 소실점이 제공되면
+        vp_x, vp_y = vanishing_point  # 실제 소실점 사용
+    else:  # 소실점이 없으면
+        vp_x = (x_min + x_max) / 2  # 이미지 중심 (기본값)
+        vp_y = (y_min + y_max) / 2
     
-    back_bottom_left = (int(center_x + (x_min - center_x) * perspective_scale), 
-                        int(center_y + (y_max - center_y) * perspective_scale))  # 뒷면 왼쪽 아래
-    back_bottom_right = (int(center_x + (x_max - center_x) * perspective_scale),
-                         int(center_y + (y_max - center_y) * perspective_scale))  # 뒷면 오른쪽 아래
-    back_top_right = (int(center_x + (x_max - center_x) * perspective_scale),
-                      int(center_y + (y_min - center_y) * perspective_scale))  # 뒷면 오른쪽 위
-    back_top_left = (int(center_x + (x_min - center_x) * perspective_scale),
-                     int(center_y + (y_min - center_y) * perspective_scale))  # 뒷면 왼쪽 위
+    # [개선] Depth 범위에서 perspective 강도 계산
+    if depth_diff > 0:
+        # 깊이 차이가 크면 perspective가 더 강함
+        # 원근감을 더 강하게 하기 위해 범위를 0.4~0.85로 조정
+        perspective_scale = 0.85 - (depth_diff / (max_depth + 1)) * 0.45
+        perspective_scale = max(0.4, min(0.85, perspective_scale))  # 범위 제한
+    else:
+        perspective_scale = 0.65  # 깊이 차이 없으면 더 강한 원근
+    
+    # [추가 개선] 바운딩 박스 중심에서 소실점까지의 거리로 회전 앙각 계산
+    bbox_center_x = (x_min + x_max) / 2
+    bbox_center_y = (y_min + y_max) / 2
+    dx = vp_x - bbox_center_x
+    dy = vp_y - bbox_center_y
+    
+    # [추가 개선] 상단이 소실점 방향으로 더 많이 축소되는 효과
+    # 이는 객체가 지면에 놓여있고 카메라가 위쪽을 향하는 효과를 냄
+    top_perspective_scale = perspective_scale * 0.85  # 상단을 더 축소
+    bottom_perspective_scale = perspective_scale * 1.0  # 하단은 유지
+    
+    # 뒷면 4개 정점 (소실점 기반 계산 + 기울기 추가) [개선]
+    back_bottom_left = (int(vp_x + (x_min - vp_x) * bottom_perspective_scale), 
+                        int(vp_y + (y_max - vp_y) * bottom_perspective_scale))  # 뒷면 왼쪽 아래
+    back_bottom_right = (int(vp_x + (x_max - vp_x) * bottom_perspective_scale),
+                         int(vp_y + (y_max - vp_y) * bottom_perspective_scale))  # 뒷면 오른쪽 아래
+    back_top_right = (int(vp_x + (x_max - vp_x) * top_perspective_scale),
+                      int(vp_y + (y_min - vp_y) * top_perspective_scale))  # 뒷면 오른쪽 위 (더 축소)
+    back_top_left = (int(vp_x + (x_min - vp_x) * top_perspective_scale),
+                     int(vp_y + (y_min - vp_y) * top_perspective_scale))  # 뒷면 왼쪽 위 (더 축소)
     
     # 9개 선 (앞면 4개 + 뒷면 4개 + 연결선 4개 중 1개만)
     front_edges = [  # 앞면 4개 엣지
@@ -966,7 +990,8 @@ def draw_lamp_structure(img, bbox_2d, depth_map, segment_mask, color, thickness=
 
 
 def draw_shape_based_3d(img, segment_mask, depth_map, class_name, color, thickness=2, 
-                       all_segments_info=None, seg_map_resized=None, img_bgr_resized=None):
+                       all_segments_info=None, seg_map_resized=None, img_bgr_resized=None, 
+                       vanishing_point=None):
     """
     클래스 이름을 기반으로 적절한 3D 형태를 그립니다.
     
@@ -980,6 +1005,7 @@ def draw_shape_based_3d(img, segment_mask, depth_map, class_name, color, thickne
         all_segments_info (list, optional): 모든 세그먼트 정보 (wall용)
         seg_map_resized (numpy.ndarray, optional): 리사이즈된 세그멘테이션 맵 (wall용)
         img_bgr_resized (numpy.ndarray, optional): 리사이즈된 원본 이미지 (building용)
+        vanishing_point (tuple, optional): 소실점 (x, y), [개선] 추가됨
     """
     # 2D 바운딩 박스 계산
     y_coords, x_coords = np.where(segment_mask)  # 마스크 영역의 좌표 추출
@@ -1004,14 +1030,17 @@ def draw_shape_based_3d(img, segment_mask, depth_map, class_name, color, thickne
         draw_horizontal_plane(img, segment_mask, color, thickness)  # 수평 평면 그리기
     elif shape_type == "wall":  # 벽
         if all_segments_info is not None and seg_map_resized is not None:  # 필요한 정보가 있으면
+            # [개선] 소실점을 전달
             draw_wall_structure(img, bbox_2d, depth_map, segment_mask, all_segments_info, 
-                              seg_map_resized, color, thickness)  # 벽 그리기
+                              seg_map_resized, color, thickness, vanishing_point=vanishing_point)  # 벽 그리기
         else:  # 정보가 없으면
             draw_horizontal_plane(img, segment_mask, color, thickness)  # 기본 평면 그리기
     elif shape_type == "bridge" or shape_type == "chair" or shape_type == "table":  # 다리, 의자, 테이블
         draw_bridge_chair_table(img, bbox_2d, depth_map, segment_mask, color, thickness)  # 다리/의자/테이블 그리기
     elif shape_type == "bed":  # 침대
-        draw_table_bed_cube(img, bbox_2d, depth_map, segment_mask, color, thickness)  # 침대 그리기
+        # [개선] 소실점을 전달하여 더 정확한 원근 표현
+        draw_table_bed_cube(img, bbox_2d, depth_map, segment_mask, color, thickness, 
+                           vanishing_point=vanishing_point)  # 침대 그리기 (소실점 활용)
     elif shape_type == "building":  # 건물
         if img_bgr_resized is not None:  # 이미지가 있으면
             draw_building_structure(img, bbox_2d, depth_map, segment_mask, img_bgr_resized, color, thickness)  # 건물 그리기
@@ -1046,7 +1075,7 @@ def draw_shape_based_3d(img, segment_mask, depth_map, class_name, color, thickne
 
 def visualize_cv2_all(img_bgr, seg_map, segments_info, id2label, is_thing_map, 
                      depth_map, filename, seg_time, depth_time, show_depth_mode=False, 
-                     show_3d_boxes=False, selected_segment_id=None):
+                     show_3d_boxes=False, selected_segment_id=None, vanishing_point=None):
     """
     Panoptic Segmentation과 Depth Estimation 결과를 OpenCV를 사용하여 시각화합니다.
     
@@ -1066,6 +1095,7 @@ def visualize_cv2_all(img_bgr, seg_map, segments_info, id2label, is_thing_map,
         show_depth_mode (bool): True면 Depth Map을 배경으로 사용, False면 원본 이미지 사용
         show_3d_boxes (bool): True면 3D 바운딩 박스 표시
         selected_segment_id (int, optional): 선택된 세그먼트 ID (None이면 모두 표시)
+        vanishing_point (tuple, optional): 소실점 (x, y), [개선] 추가됨
     
     Returns:
         numpy.ndarray: 시각화된 이미지 (BGR 형식)
@@ -1172,7 +1202,7 @@ def visualize_cv2_all(img_bgr, seg_map, segments_info, id2label, is_thing_map,
     
     for cid, (cx, cy) in centroids.items():  # 각 중심점에 대해
         label_id = inst_info[cid]['label_id']  # 라벨 ID 가져오기
-        class_name = id2label.get(label_id, str(label_id)).split()[0]  # 클래스 이름 가져오기 (첫 번째만)
+        class_name = id2label.get(label_id, str(label_id)).split(';')[0]  # 클래스 이름 가져오기 (첫 번째만)
         score = inst_info[cid].get('score', 0.0)  # 신뢰도 점수 가져오기
         avg_depth = segment_depths.get(cid, 0.0)  # 평균 depth 가져오기
         
@@ -1213,9 +1243,10 @@ def visualize_cv2_all(img_bgr, seg_map, segments_info, id2label, is_thing_map,
             b, g, r = get_color(segment_idx)  # 색상 가져오기
             
             # 클래스 이름 기반 3D 형태 그리기
+            # [개선] 소실점을 draw_shape_based_3d에 전달
             draw_shape_based_3d(blended, mask_resized, depth_resized, class_name, (b, g, r), thickness=2,
                               all_segments_info=segments_info, seg_map_resized=seg_map_resized, 
-                              img_bgr_resized=resized_orig)  # 형태 기반 3D 그리기
+                              img_bgr_resized=resized_orig, vanishing_point=vanishing_point)  # 소실점 전달
 
     # 상단 정보
     thing_count = sum(1 for s in segments_info if is_thing_map.get(s['label_id'], False))  # Thing 개수 계산
@@ -1403,6 +1434,10 @@ def main():
     print(f"  - Thing: {thing_count}개 클래스")  # Thing 개수 출력
     print(f"  - Stuff: {stuff_count}개 클래스")  # Stuff 개수 출력
     
+    # [개선] 소실점 검출기 초기화
+    vp_detector = VanishingPointDetector()  # 소실점 검출기 인스턴스 생성
+    print("✓ VanishingPointDetector 활성화됨")  # 활성화 메시지 출력
+    
     # 첫 번째 이미지 추론
     cur_idx = 0  # 현재 이미지 인덱스 초기화
     show_depth_mode = False  # Depth 모드 상태 초기화 (False = Segmentation 모드)
@@ -1428,10 +1463,12 @@ def main():
             print("🖱️ 모든 인스턴스 표시")  # 모든 인스턴스 표시 메시지 출력
             # 시각화 업데이트
             if current_seg_map is not None:  # 세그멘테이션 맵이 있으면
+                # [개선] 소실점 검출
+                vanishing_point = vp_detector.find_vanishing_point(current_img_bgr)  # 소실점 검출
                 _, current_seg_map_resized = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
                                          is_thing_map, current_depth_map, current_filename, 
                                          current_seg_time, current_depth_time, show_depth_mode, 
-                                         show_3d_boxes, selected_segment_id)  # 시각화
+                                         show_3d_boxes, selected_segment_id, vanishing_point=vanishing_point)  # 소실점 전달
         elif event == cv2.EVENT_LBUTTONDOWN:  # 왼쪽 버튼 클릭
             if current_seg_map_resized is not None:  # 세그멘테이션 맵이 있으면
                 # 클릭한 위치의 세그먼트 ID 찾기
@@ -1483,10 +1520,12 @@ def main():
                     
                     # 시각화 업데이트
                     if current_seg_map is not None:  # 세그멘테이션 맵이 있으면
+                        # [개선] 소실점 검출
+                        vanishing_point = vp_detector.find_vanishing_point(current_img_bgr)  # 소실점 검출
                         _, current_seg_map_resized = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
                                          is_thing_map, current_depth_map, current_filename, 
                                          current_seg_time, current_depth_time, show_depth_mode, 
-                                         show_3d_boxes, selected_segment_id)  # 시각화
+                                         show_3d_boxes, selected_segment_id, vanishing_point=vanishing_point)  # 소실점 전달
     
     # 마우스 콜백 등록
     window_name = "OneFormer + Depth - Panoptic Segmentation"  # 윈도우 이름
@@ -1500,10 +1539,12 @@ def main():
         current_seg_map, current_segments_info, current_depth_map, current_img_bgr, \
         current_filename, current_seg_time, current_depth_time = result  # 결과 저장
         # 현재 모드에 맞게 시각화
+        # [개선] 소실점 검출
+        vanishing_point = vp_detector.find_vanishing_point(current_img_bgr)  # 소실점 검출
         _, current_seg_map_resized = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
                          is_thing_map, current_depth_map, current_filename, 
                          current_seg_time, current_depth_time, show_depth_mode, 
-                         show_3d_boxes, selected_segment_id)  # 시각화
+                         show_3d_boxes, selected_segment_id, vanishing_point=vanishing_point)  # 소실점 전달
 
     print("\n키: A/← (이전), D/→ (다음), S (모드 전환), E (3D 박스), Q (종료)")  # 사용법 안내 출력
     print("마우스: 왼쪽 클릭 (세그먼트 선택), 우클릭 (모든 인스턴스 표시)")  # 마우스 사용법 안내 출력
@@ -1518,11 +1559,13 @@ def main():
                 current_seg_map, current_segments_info, current_depth_map, current_img_bgr, \
                 current_filename, current_seg_time, current_depth_time = result  # 결과 저장
                 selected_segment_id = None  # 이미지 변경 시 선택 해제
+                # [개선] 소실점 검출
+                vanishing_point = vp_detector.find_vanishing_point(current_img_bgr)  # 소실점 검출
                 # 현재 모드에 맞게 시각화
                 _, current_seg_map_resized = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
                                  is_thing_map, current_depth_map, current_filename, 
                                  current_seg_time, current_depth_time, show_depth_mode, 
-                                 show_3d_boxes, selected_segment_id)  # 시각화
+                                 show_3d_boxes, selected_segment_id, vanishing_point=vanishing_point)  # 소실점 전달
         elif key == ord('d') or key == 0x270000:  # 'd' 또는 오른쪽 화살표 키
             cur_idx = (cur_idx + 1) % len(image_files)  # 다음 이미지로 이동
             result = run_inference(cur_idx, processor, segmentation_model, depth_estimator, device,
@@ -1531,21 +1574,25 @@ def main():
                 current_seg_map, current_segments_info, current_depth_map, current_img_bgr, \
                 current_filename, current_seg_time, current_depth_time = result  # 결과 저장
                 selected_segment_id = None  # 이미지 변경 시 선택 해제
+                # [개선] 소실점 검출
+                vanishing_point = vp_detector.find_vanishing_point(current_img_bgr)  # 소실점 검출
                 # 현재 모드에 맞게 시각화
                 _, current_seg_map_resized = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
                                  is_thing_map, current_depth_map, current_filename, 
                                  current_seg_time, current_depth_time, show_depth_mode, 
-                                 show_3d_boxes, selected_segment_id)  # 시각화
+                                 show_3d_boxes, selected_segment_id, vanishing_point=vanishing_point)  # 소실점 전달
         elif key == ord('s'):  # 's' 키 - 모드 전환
             show_depth_mode = not show_depth_mode  # 모드 토글
             if current_seg_map is not None:  # 추론 결과가 있으면
                 mode_name = "Depth Map 모드" if show_depth_mode else "Segmentation 모드"  # 모드 이름
                 print(f"🔄 모드 전환: {mode_name}")  # 모드 전환 메시지 출력
+                # [개선] 소실점 검출
+                vanishing_point = vp_detector.find_vanishing_point(current_img_bgr)  # 소실점 검출
                 # 현재 모드에 맞게 시각화
                 _, current_seg_map_resized = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
                                  is_thing_map, current_depth_map, current_filename, 
                                  current_seg_time, current_depth_time, show_depth_mode, 
-                                 show_3d_boxes, selected_segment_id)  # 시각화
+                                 show_3d_boxes, selected_segment_id, vanishing_point=vanishing_point)  # 소실점 전달
             else:  # 추론 결과가 없으면
                 print("⚠️ 먼저 이미지를 로드하세요.")  # 경고 메시지 출력
         elif key == ord('e'):  # 'e' 키 - 3D 박스 토글
@@ -1553,11 +1600,13 @@ def main():
             if current_seg_map is not None:  # 추론 결과가 있으면
                 box_status = "ON" if show_3d_boxes else "OFF"  # 박스 상태
                 print(f"📦 3D 박스: {box_status}")  # 박스 상태 메시지 출력
+                # [개선] 소실점 검출
+                vanishing_point = vp_detector.find_vanishing_point(current_img_bgr)  # 소실점 검출
                 # 현재 모드에 맞게 시각화
                 _, current_seg_map_resized = visualize_cv2_all(current_img_bgr, current_seg_map, current_segments_info, id2label, 
                                  is_thing_map, current_depth_map, current_filename, 
                                  current_seg_time, current_depth_time, show_depth_mode, 
-                                 show_3d_boxes, selected_segment_id)  # 시각화
+                                 show_3d_boxes, selected_segment_id, vanishing_point=vanishing_point)  # 소실점 전달
             else:  # 추론 결과가 없으면
                 print("⚠️ 먼저 이미지를 로드하세요.")  # 경고 메시지 출력
         elif key == ord('q'):  # 'q' 키

@@ -15,7 +15,7 @@ COCO Panoptic Segmentation (panoptic_fpn_R_50_3x) + 신뢰도 표시
     6. 추론 시간 및 Thing/Stuff 개수 정보 표시
     
     사용 모델:
-    - 모델: COCO-PanopticSegmentation/panoptic_fpn_R_50_3x
+    - 모델: COCO-PanopticSegmentation/panoptic_fpn_R_101_3x
     - 데이터셋: COCO (133개 클래스: 80 Thing + 53 Stuff)
     - 분류: Thing(객체) / Stuff(배경) 공식 분류 사용
     
@@ -132,6 +132,45 @@ COCO Panoptic Segmentation (panoptic_fpn_R_50_3x) + 신뢰도 표시
 - 클래스 이름 매핑 실패 시 메타데이터에서 직접 가져오는 fallback 로직 구현
 - Stuff 세그먼트는 신뢰도 점수가 없으므로 클래스 ID만 표시
 - Thing 세그먼트는 신뢰도 점수가 있으면 함께 표시
+
+================================================================================
+id / class name 불일치 문제 정리 (2025-11-27)
+================================================================================
+
+1. 문제 현상
+   - ADE20K 이미지에 COCO panoptic 모델(panoptic_fpn_R_101_3x)을 적용했을 때,
+     사람이 보기엔 bed, chair, table, car처럼 보이는데
+     라벨은 potted plant, cake, bed, bicycle 등 COCO panoptic 이름으로 표시되었다.
+   - 특히 COCO 80-클래스 detection 기준으로 기억하고 있는 id 표(예: 56=chair, 59=bed, 60=dining table)와
+     COCO Panoptic 133-클래스 id 표가 달라서, id는 맞는데 이름이 이상하게 느껴지는 문제가 있었다.
+
+2. 원인 분석
+   - Detectron2 panoptic 모델은 COCO Panoptic(133 클래스)용 category_id를 사용한다.
+     * 예: 56=cake, 59=potted plant, 60=bed, 61=dining table, 24=backpack, 2=bicycle ...
+   - 이 스크립트와 `_ex` 모두 `outputs["panoptic_seg"]`의 segments_info.category_id와
+     MetadataCatalog의 thing_class_id / stuff_class_id를 그대로 사용하므로,
+     "모델 기준"으로는 id→이름 매핑이 정확하다.
+   - 사용자가 기대한 것은 COCO-80 detection 스타일의 이름(id=56→chair, 60→table, 2→car, 24→backpack, 61→toilet 등)이라
+     두 개의 id/name 맵이 섞여 보인 것이 문제의 본질이었다.
+
+3. 해결 방법
+   - 추론 id(category_id)와 isthing 값은 그대로 유지하고, 시각화에 사용되는 "표시용 클래스 이름"만 별도 맵으로 보정한다.
+   - 공통 함수 `get_class_name_from_segment(seg_info, metadata)`에서:
+     a) 먼저 MetadataCatalog를 사용해 COCO Panoptic 공식 이름을 계산
+        - Thing: thing_class_id / thing_classes
+        - Stuff: stuff_class_id / stuff_classes
+     b) 이름이 없으면 `id_<category_id>` 형태로 fallback
+     c) 마지막에 `CUSTOM_CLASS_NAME_MAP[category_id]`가 있으면 그 값으로 한 번 더 오버라이드
+   - 이렇게 하면:
+     - id와 isthing은 항상 모델 출력 그대로 유지
+     - 이름만 사용자 정의 표에 맞게 "chair", "table", "car", "backpack", "toilet" 등으로 보정된다.
+
+4. 현재 매핑 규칙 요약
+   - id는 항상 segments_info["category_id"] (COCO Panoptic 기준)를 그대로 표시한다.
+   - 이름은 다음 우선순위로 결정된다.
+     1) MetadataCatalog 기반 COCO Panoptic 공식 이름
+     2) 없으면 "id_<category_id>"
+     3) 마지막으로 CUSTOM_CLASS_NAME_MAP에 등록된 이름(사용자 정의 COCO-80 스타일 이름)으로 오버라이드
 """
 
 import os  # 파일 시스템 경로 조작
@@ -146,6 +185,63 @@ from detectron2 import model_zoo
 from detectron2.engine import DefaultPredictor
 from detectron2.utils.logger import setup_logger
 from detectron2.data import MetadataCatalog
+
+# COCO → 사용자 정의 클래스 이름 오버라이드 맵
+# 사용자가 원하는 COCO-80 스타일 이름으로 표시하기 위한 매핑
+# (category_id: 원하는 표시 이름)
+CUSTOM_CLASS_NAME_MAP = {
+    24: "backpack",
+    60: "table",
+    56: "chair",
+    61: "toilet",
+    2: "car",
+}
+
+
+def get_class_name_from_segment(seg_info, metadata):
+    """
+    Dtr2_CoCOpanoptic._ex.py에서 사용한 것과 동일한 방식으로
+    COCO panoptic의 segment 정보에서 클래스 이름을 가져옵니다.
+
+    Args:
+        seg_info (dict): segments_info의 개별 세그먼트 딕셔너리
+        metadata: Detectron2 MetadataCatalog 객체
+
+    Returns:
+        str: 클래스 이름 (매핑 실패 시 "id_<category_id>" 형식)
+    """
+    cat_id = seg_info.get("category_id", -1)
+    is_thing = seg_info.get("isthing", False)
+
+    class_name = None
+    if is_thing and hasattr(metadata, "thing_classes"):
+        if hasattr(metadata, "thing_class_id"):
+            try:
+                idx = metadata.thing_class_id.index(cat_id)
+                class_name = metadata.thing_classes[idx]
+            except (ValueError, AttributeError):
+                class_name = None
+        else:
+            if cat_id == 0 and len(metadata.thing_classes) > 0:
+                class_name = metadata.thing_classes[0]
+            elif 1 <= cat_id <= len(metadata.thing_classes):
+                class_name = metadata.thing_classes[cat_id - 1]
+    elif (not is_thing) and hasattr(metadata, "stuff_classes"):
+        if hasattr(metadata, "stuff_class_id"):
+            try:
+                idx = metadata.stuff_class_id.index(cat_id)
+                class_name = metadata.stuff_classes[idx]
+            except (ValueError, AttributeError):
+                class_name = None
+        else:
+            if 0 <= cat_id < len(metadata.stuff_classes):
+                class_name = metadata.stuff_classes[cat_id]
+
+    # 기본 COCO 이름이 없으면 id_표기 사용
+    class_name = class_name if class_name else f"id_{cat_id}"
+    # 최종적으로 사용자 정의 이름으로 한 번 더 오버라이드
+    return CUSTOM_CLASS_NAME_MAP.get(cat_id, class_name)
+
 
 def visualize_cv2_all(img_bgr, seg_map, segments_info, filename, inference_time, metadata):
     """
@@ -198,156 +294,160 @@ def visualize_cv2_all(img_bgr, seg_map, segments_info, filename, inference_time,
         bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0][0]  # HSV를 BGR로 변환
         return tuple(map(int, bgr))  # 정수 튜플로 반환
 
-    inst_info = {s['id']: s for s in segments_info}  # 세그먼트 정보를 딕셔너리로 변환
+    inst_info = {s["id"]: s for s in segments_info}  # 세그먼트 정보를 딕셔너리로 변환
     unique_ids = np.unique(seg_map)  # 고유 세그먼트 ID 추출
-    centroids = {}  # 중심점 저장 딕셔너리 초기화
     
-    # Stuff 그리기
-    for i, cid in enumerate(unique_ids):  # 각 고유 ID 순회
-        if cid not in inst_info:  # 정보가 없으면 건너뛰기
+    # Stuff 그리기 (반투명 오버레이만 적용 – 라벨은 아래에서 contour 기반으로 한 번에 처리)
+    for i, cid in enumerate(unique_ids):
+        if cid not in inst_info:
             continue
-        info = inst_info[cid]  # 세그먼트 정보 가져오기
-        # Thing 여부 확인 (segments_info에서 직접 가져오기)
-        is_thing = info.get('isthing', False)
-        
-        if is_thing:  # Thing이면 건너뛰기
+        info = inst_info[cid]
+        is_thing = info.get("isthing", False)
+        if is_thing:
             continue
 
-        mask = seg_map == cid  # 현재 ID에 해당하는 마스크 생성
-        if not np.any(mask):  # 마스크가 비어있으면 건너뛰기
+        mask = seg_map == cid
+        if not np.any(mask):
             continue
-        
-        mask_resized = cv2.resize(mask.astype(np.uint8), (target_w, target_h), interpolation=cv2.INTER_NEAREST)  # 마스크 리사이즈
-        
-        b, g, r = get_color(i)  # 색상 가져오기
-        overlay_stuff[mask_resized > 0] = (b, g, r)  # Stuff 영역에 색상 적용
-        
-        y, x = np.where(mask_resized > 0)  # 마스크 영역의 좌표 추출
-        if len(y) > 0 and len(x) > 0:  # 좌표가 있으면
-            centroids[int(cid)] = (int(x.mean()), int(y.mean()))  # 중심점 계산 및 저장
+
+        mask_resized = cv2.resize(
+            mask.astype(np.uint8), (target_w, target_h), interpolation=cv2.INTER_NEAREST
+        )
+
+        b, g, r = get_color(i)
+        overlay_stuff[mask_resized > 0] = (b, g, r)
 
     alpha = 120 / 255.0  # 투명도 설정
     blended = cv2.addWeighted(overlay_stuff, alpha, resized_orig, 1 - alpha, 0)  # Stuff 오버레이와 원본 이미지 블렌딩
 
-    # Thing 그리기
-    for i, cid in enumerate(unique_ids):  # 각 고유 ID 순회
-        if cid not in inst_info:  # 정보가 없으면 건너뛰기
-            continue
-            
-        info = inst_info[cid]  # 세그먼트 정보 가져오기
-        # Thing 여부 확인 (segments_info에서 직접 가져오기)
-        is_thing = info.get('isthing', False)
-        
-        if not is_thing:  # Thing이 아니면 건너뛰기
+    # Thing 그리기 (윤곽선만 – 라벨은 아래에서 contour 기반으로 한 번에 처리)
+    for i, cid in enumerate(unique_ids):
+        if cid not in inst_info:
             continue
 
-        mask = seg_map == cid  # 현재 ID에 해당하는 마스크 생성
-        if not np.any(mask):  # 마스크가 비어있으면 건너뛰기
+        info = inst_info[cid]
+        is_thing = info.get("isthing", False)
+        if not is_thing:
             continue
-        
-        mask_resized = cv2.resize(mask.astype(np.uint8), (target_w, target_h), interpolation=cv2.INTER_NEAREST)  # 마스크 리사이즈
-        mask_resized = (mask_resized * 255).astype(np.uint8)  # 마스크를 0-255 범위로 변환
-        
-        b, g, r = get_color(i)  # 색상 가져오기
-        contours, _ = cv2.findContours(mask_resized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  # 외곽선 찾기
-        cv2.drawContours(blended, contours, -1, (b, g, r), 2)  # Thing 외곽선 그리기
-        
-        y, x = np.where(mask_resized > 0)  # 마스크 영역의 좌표 추출
-        if len(y) > 0 and len(x) > 0:  # 좌표가 있으면
-            centroids[int(cid)] = (int(x.mean()), int(y.mean()))  # 중심점 계산 및 저장
 
-    # 라벨 + 신뢰도 텍스트
-    font_scale = cv2.getFontScaleFromHeight(cv2.FONT_HERSHEY_SIMPLEX, 12, 1)  # 폰트 크기 계산
-    
-    for cid, (cx, cy) in centroids.items():  # 각 중심점에 대해
-        if cid not in inst_info:  # 정보가 없으면 건너뛰기
+        mask = seg_map == cid
+        if not np.any(mask):
             continue
-        info = inst_info[cid]  # 세그먼트 정보 가져오기
-        
-        # COCO 형식: 'category_id' 또는 'label_id' 사용
-        cat_id = info.get('category_id', info.get('label_id', -1))
-        
-        # Thing 여부 확인 (segments_info에서 직접 가져오기)
-        is_thing = info.get('isthing', False)
-        
-        # 클래스 이름 가져오기 (Dtr2_panoptic._ex.py 방식: thing_class_id/stuff_class_id 우선, 없으면 인덱스 사용)
-        class_name = None
-        
-        if is_thing and hasattr(metadata, 'thing_classes'):
-            if hasattr(metadata, 'thing_class_id'):
-                # thing_class_id가 있으면 COCO 원본 ID로 매핑
-                try:
-                    idx = metadata.thing_class_id.index(cat_id)
-                    class_name = metadata.thing_classes[idx]
-                except (ValueError, AttributeError):
-                    class_name = None
-            else:
-                # thing_class_id가 없으면 category_id를 직접 인덱스로 사용
-                if cat_id == 0:
-                    # category_id: 0은 "person" (thing_classes[0])
-                    if len(metadata.thing_classes) > 0:
-                        class_name = metadata.thing_classes[0]
-                elif 1 <= cat_id <= len(metadata.thing_classes):
-                    class_name = metadata.thing_classes[cat_id - 1]
-        elif not is_thing and hasattr(metadata, 'stuff_classes'):
-            if hasattr(metadata, 'stuff_class_id'):
-                # stuff_class_id가 있으면 COCO 원본 ID로 매핑
-                try:
-                    idx = metadata.stuff_class_id.index(cat_id)
-                    class_name = metadata.stuff_classes[idx]
-                except (ValueError, AttributeError):
-                    class_name = None
-            else:
-                # stuff_class_id가 없으면 category_id를 직접 인덱스로 사용
-                if 0 <= cat_id < len(metadata.stuff_classes):
-                    class_name = metadata.stuff_classes[cat_id]
-        
-        # 매핑 실패 시 category_id를 그대로 표시
-        if class_name is None:
-            class_name = f"id_{cat_id}"
-        
-        # 디버깅: class_id와 class_name 출력 (매핑 과정 상세 출력)
-        if is_thing and hasattr(metadata, 'thing_class_id') and cat_id in metadata.thing_class_id:
-            idx = metadata.thing_class_id.index(cat_id)
-            print(f"[DEBUG] cid={cid}, category_id={cat_id}, isthing={is_thing}, "
-                  f"thing_class_id[{idx}]={metadata.thing_class_id[idx]}, "
-                  f"thing_classes[{idx}]='{metadata.thing_classes[idx]}', class_name='{class_name}'")
-        elif not is_thing and hasattr(metadata, 'stuff_class_id') and cat_id in metadata.stuff_class_id:
-            idx = metadata.stuff_class_id.index(cat_id)
-            print(f"[DEBUG] cid={cid}, category_id={cat_id}, isthing={is_thing}, "
-                  f"stuff_class_id[{idx}]={metadata.stuff_class_id[idx]}, "
-                  f"stuff_classes[{idx}]='{metadata.stuff_classes[idx]}', class_name='{class_name}'")
+
+        mask_resized = cv2.resize(
+            mask.astype(np.uint8), (target_w, target_h), interpolation=cv2.INTER_NEAREST
+        )
+        mask_resized = (mask_resized * 255).astype(np.uint8)
+
+        b, g, r = get_color(i)
+        contours, _ = cv2.findContours(
+            mask_resized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        cv2.drawContours(blended, contours, -1, (b, g, r), 2)
+
+    # 라벨 + 신뢰도 텍스트 (Dtr2_CoCOpanoptic._ex.py Contour 모드와 동일한 스타일)
+    font_scale = cv2.getFontScaleFromHeight(cv2.FONT_HERSHEY_SIMPLEX, 12, 1)
+    font_thickness = 1
+
+    for i, cid in enumerate(unique_ids):
+        if cid not in inst_info:
+            continue
+        info = inst_info[cid]
+
+        mask = seg_map == cid
+        if not np.any(mask):
+            continue
+
+        mask_resized = cv2.resize(
+            mask.astype(np.uint8), (target_w, target_h), interpolation=cv2.INTER_NEAREST
+        )
+        mask_resized = (mask_resized * 255).astype(np.uint8)
+
+        contours, _ = cv2.findContours(
+            mask_resized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            continue
+
+        # 가장 큰 윤곽선의 중심점 계산
+        largest_contour = max(contours, key=cv2.contourArea)
+        M = cv2.moments(largest_contour)
+        if M["m00"] == 0:
+            continue
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+
+        # 클래스/ID/점수 정보
+        cat_id = info.get("category_id", info.get("label_id", -1))
+        is_thing = info.get("isthing", False)
+        class_name = get_class_name_from_segment(info, metadata)
+        score = info.get("score", None)
+
+        # 디버깅 출력 (예제와 유사)
+        print(
+            f"[DEBUG] cid={cid}, category_id={cat_id}, isthing={is_thing}, class_name='{class_name}'"
+        )
+
+        if score is not None and score > 0:
+            id_score_text = f"id:{cat_id} {score:.2f}"
         else:
-            print(f"[DEBUG] cid={cid}, category_id={cat_id}, isthing={is_thing}, class_name='{class_name}'")
-        
-        score = info.get('score', None)  # 신뢰도 점수 가져오기 (Stuff는 None일 수 있음)
-        
-        # 첫 번째 줄: 클래스 이름
-        label_text = f"{class_name}"  # 라벨 텍스트 생성
-        
-        # Thing 여부는 이미 위에서 확인했음
-        text_color = (0, 255, 255) if is_thing else (255, 255, 255)  # Thing은 노란색, Stuff는 흰색
-        
-        # 클래스 이름 그리기
-        cv2.putText(blended, label_text, (cx - 10, cy),  # 텍스트 그리기
-                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1, cv2.LINE_AA)
-        
-        # 두 번째 줄: 신뢰도 또는 ID 표시
-        if is_thing and score is not None and score > 0:
-            # Thing이고 신뢰도가 있는 경우: [category_id] score 형식
-            score_text = f"[{cat_id}] {score:.2f}"  # 신뢰도 텍스트 생성
-            cv2.putText(blended, score_text, (cx - 10, cy + 15),  # 신뢰도 텍스트 그리기
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.8, text_color, 1, cv2.LINE_AA)
-        elif is_thing:
-            # Thing이지만 신뢰도가 없는 경우: [category_id]만 표시
-            id_text = f"[{cat_id}]"  # 클래스 ID만 표시
-            cv2.putText(blended, id_text, (cx - 10, cy + 15),  # ID 텍스트 그리기
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.8, text_color, 1, cv2.LINE_AA)
-        else:
-            # Stuff인 경우: [category_id]만 표시 (Stuff는 신뢰도가 없음)
-            id_text = f"[{cat_id}]"  # 클래스 ID만 표시
-            cv2.putText(blended, id_text, (cx - 10, cy + 15),  # ID 텍스트 그리기
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.8, text_color, 1, cv2.LINE_AA)
+            id_score_text = f"id:{cat_id}"
+
+        # Thing/Stuff에 따라 배경색 결정
+        bg_color = (255, 0, 0) if is_thing else (0, 0, 0)
+        contour_color = get_color(i)
+
+        # 텍스트 크기 계산
+        (text_w1, text_h1), _ = cv2.getTextSize(
+            class_name, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness
+        )
+        (text_w2, text_h2), _ = cv2.getTextSize(
+            id_score_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness
+        )
+        max_text_w = max(text_w1, text_w2)
+        total_text_h = text_h1 + text_h2 + 5
+
+        # 텍스트 배경 박스
+        bg_y1 = cy - total_text_h - 2
+        bg_y2 = cy + 2
+        cv2.rectangle(
+            blended,
+            (cx - max_text_w // 2 - 2, bg_y1),
+            (cx + max_text_w // 2 + 2, bg_y2),
+            bg_color,
+            -1,
+        )
+        cv2.rectangle(
+            blended,
+            (cx - max_text_w // 2 - 2, bg_y1),
+            (cx + max_text_w // 2 + 2, bg_y2),
+            contour_color,
+            1,
+        )
+
+        # 첫 줄: 클래스 이름
+        cv2.putText(
+            blended,
+            class_name,
+            (cx - text_w1 // 2, cy - text_h2 - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (255, 255, 255),
+            font_thickness,
+            cv2.LINE_AA,
+        )
+
+        # 둘째 줄: id:score
+        cv2.putText(
+            blended,
+            id_score_text,
+            (cx - text_w2 // 2, cy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (255, 255, 255),
+            font_thickness,
+            cv2.LINE_AA,
+        )
 
     # 상단 정보 (Tutorial 방식: segments_info의 'isthing' 필드 직접 사용)
     thing_count = sum(1 for s in segments_info if s.get('isthing', False))  # Thing 개수 계산
@@ -379,8 +479,8 @@ if not image_files:  # 이미지가 없으면
     raise FileNotFoundError(f"'{IMAGE_DIR}'에 이미지가 없습니다.")  # 에러 발생
 print(f"📂 {len(image_files)}개 이미지")  # 이미지 개수 출력
 
-# Detectron2 설정 및 모델 로드
-config_file = "COCO-PanopticSegmentation/panoptic_fpn_R_50_3x.yaml"
+# Detectron2 설정 및 모델 로드 (예제 스크립트와 동일한 R_101_3x 모델 사용)
+config_file = "COCO-PanopticSegmentation/panoptic_fpn_R_101_3x.yaml"
 print(f"🔧 모델 로드: {config_file}")  # 모델 로드 메시지 출력
 
 cfg = get_cfg()
@@ -389,54 +489,8 @@ cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(config_file)
 cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5  # 추론 시 임계값 설정
 predictor = DefaultPredictor(cfg)
 
-# COCO 데이터셋 메타데이터 가져오기
-# Detectron2 공식 Tutorial 방식 사용: MetadataCatalog.get(cfg.DATASETS.TRAIN[0])
-# 이것이 가장 정확한 방법입니다!
-if hasattr(cfg, 'DATASETS') and len(cfg.DATASETS.TRAIN) > 0:
-    dataset_name = cfg.DATASETS.TRAIN[0]
-    metadata = MetadataCatalog.get(dataset_name)
-    print(f"[DEBUG] Detectron2 공식 방식: MetadataCatalog.get(cfg.DATASETS.TRAIN[0]) = {dataset_name}")
-elif hasattr(cfg, 'DATASETS') and len(cfg.DATASETS.TEST) > 0:
-    dataset_name = cfg.DATASETS.TEST[0]
-    metadata = MetadataCatalog.get(dataset_name)
-    print(f"[DEBUG] cfg.DATASETS.TEST[0]에서 메타데이터 가져옴: {dataset_name}")
-else:
-    # 기본값 사용
-    dataset_name = "coco_2017_val_panoptic_with_sem_seg"
-    metadata = MetadataCatalog.get(dataset_name)
-    print(f"[DEBUG] 기본 데이터셋 이름 사용: {dataset_name}")
-
-# COCO 클래스 이름 매핑 생성 (OneFormerTyny_f.py와 동일한 구조)
-# COCO panoptic segmentation에서 category_id는 COCO의 원본 카테고리 ID를 사용
-# stuff_class_id와 thing_class_id를 사용하여 매핑 생성
-
-# 디버깅: 메타데이터 확인
-print(f"\n[DEBUG] 메타데이터 확인:")
-print(f"  - dataset_name: {dataset_name}")
-print(f"  - hasattr(metadata, 'stuff_classes'): {hasattr(metadata, 'stuff_classes')}")
-print(f"  - hasattr(metadata, 'stuff_class_id'): {hasattr(metadata, 'stuff_class_id')}")
-print(f"  - hasattr(metadata, 'thing_classes'): {hasattr(metadata, 'thing_classes')}")
-print(f"  - hasattr(metadata, 'thing_class_id'): {hasattr(metadata, 'thing_class_id')}")
-
-# 메타데이터에서 클래스 정보 확인
-if hasattr(metadata, 'thing_classes'):
-    print(f"  - thing_classes 개수: {len(metadata.thing_classes)}")
-    print(f"  - thing_classes 샘플 (처음 10개): {metadata.thing_classes[:10]}")
-if hasattr(metadata, 'thing_class_id'):
-    print(f"  - thing_class_id 개수: {len(metadata.thing_class_id)}")
-    print(f"  - thing_class_id 샘플 (처음 10개): {metadata.thing_class_id[:10]}")
-    # 매핑 확인: category_id 59가 어떤 클래스인지 확인
-    if 59 in metadata.thing_class_id:
-        idx = metadata.thing_class_id.index(59)
-        print(f"  - category_id 59 → thing_class_id[{idx}] = {metadata.thing_class_id[idx]} → thing_classes[{idx}] = '{metadata.thing_classes[idx]}'")
-if hasattr(metadata, 'stuff_classes'):
-    print(f"  - stuff_classes 개수: {len(metadata.stuff_classes)}")
-    print(f"  - stuff_classes 샘플 (처음 10개): {metadata.stuff_classes[:10]}")
-if hasattr(metadata, 'stuff_class_id'):
-    print(f"  - stuff_class_id 개수: {len(metadata.stuff_class_id)}")
-    print(f"  - stuff_class_id 샘플 (처음 10개): {metadata.stuff_class_id[:10]}")
-
-print(f"\n✓ 메타데이터 로드 완료")
+# COCO 데이터셋 메타데이터 (Dtr2_CoCOpanoptic._ex.py의 setup_model과 동일한 방식)
+metadata = MetadataCatalog.get(cfg.DATASETS.TRAIN[0])
 
 
 def run_inference(idx):
@@ -490,13 +544,16 @@ def run_inference(idx):
     thing_count = sum(1 for s in segments_info if s.get('isthing', False))  # Thing 개수 계산
     print(f"DEBUG - Thing: {thing_count}, Stuff: {len(segments_info) - thing_count}")  # 디버그 정보 출력
     
-    # 디버깅: segments_info 샘플 출력
+    # 디버깅: segments_info 전체를 id:name 형식으로 출력 (예제 스크립트와 동일한 방식)
     if len(segments_info) > 0:
-        print(f"\nDEBUG - segments_info 샘플 (처음 3개):")
-        for i, seg in enumerate(segments_info[:3]):
-            cat_id = seg.get('category_id', seg.get('label_id', -1))
-            is_thing = seg.get('isthing', False)
-            print(f"  [{i}] category_id: {cat_id}, isthing: {is_thing}")
+        print(f"\n[DEBUG] segments_info (id:name):")
+        print(f"  - type: {type(segments_info)}")
+        print(f"  - length: {len(segments_info)}")
+        for i, seg in enumerate(segments_info):
+            cat_id = seg.get("category_id", seg.get("label_id", -1))
+            is_thing = seg.get("isthing", False)
+            class_name = get_class_name_from_segment(seg, metadata)
+            print(f"    [{i}] id:{cat_id} name:{class_name} (isthing={is_thing})")
 
     print(f"✓ 추론 완료 ({inference_time:.4f}초)")  # 완료 메시지 출력
     
