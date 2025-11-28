@@ -185,6 +185,8 @@ celerybeat.pid
 .mypy_cache/
 .dmypy.json
 dmypy.json
+tracking_log*.json
+tracking_report*.json
 
 # Pyre type checker
 .pyre/
