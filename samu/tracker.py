@@ -99,6 +99,7 @@ class PoseTrackerV4:
         self.tracking_log = []                  # 프레임별 상세 로그 (JSON 저장용)
         self.frame_index = 0                    # 현재까지 처리한 프레임 번호
         self.stats = {}                         # {pose_id: {yolo_ids, frame_count, ...}} - 통계 데이터
+        self.start_time = None                  # 추적 시작 시간 (실제 시간 기반 타임코드용)
 
         # --- COCO 17 키포인트 인덱스 ---
         self.LEFT_SHOULDER = 5                  # 왼쪽 어깨
@@ -136,6 +137,7 @@ class PoseTrackerV4:
         self.tracking_log = []                  # 로그 초기화
         self.frame_index = 0                    # 프레임 번호 리셋
         self.stats = {}                         # 통계 초기화
+        self.start_time = None                  # 시작 시간 리셋 (다음 process_frame에서 재설정)
         self.model = YOLO("yolo11n-pose.pt")    # YOLO 모델 재로드 (내부 트래커 리셋)
 
     # ------------------------------------------------------------------------
@@ -324,6 +326,10 @@ class PoseTrackerV4:
         Returns:
             annotated: 시각화된 프레임 (BGR)
         """
+        # --- 시작 시간 기록 (첫 프레임에서만) ---
+        if self.start_time is None:
+            self.start_time = time.time()
+            
         self.frame_index += 1                   # 프레임 번호 증가
         results = self.model.track(frame, persist=True, verbose=False)  # YOLO 추론
 
@@ -385,12 +391,13 @@ class PoseTrackerV4:
                     
                     if pose_id != -1:
                         match_method = "POSE_MATCH"  # 포즈로 재식별 성공
-                    else:
-                        # --- 전략 3: 새 Pose ID 발급 ---
-                        pose_id = self.next_pose_id
-                        self.next_pose_id += 1
-                        match_method = "NEW"    # 새로운 사람
-                        score = np.inf
+
+                # --- 전략 3: 여전히 못 찾았으면 새 Pose ID 발급 ---
+                if pose_id == -1:
+                    pose_id = self.next_pose_id
+                    self.next_pose_id += 1
+                    match_method = "NEW"    # 새로운 사람
+                    score = np.inf
                 
                 # --- YOLO ID → Pose ID 매핑 업데이트 ---
                 if yolo_id != -1:
@@ -445,7 +452,7 @@ class PoseTrackerV4:
                     state['confirmed'] = True
 
                 current_results[i] = (yolo_id, pose_id, match_method, score)
-
+        
                 # --- 디버그 출력 ---
                 status = "CONFIRMED" if state['confirmed'] else "NEW"
                 print(f"[Frame {self.frame_index}] idx={i}: YOLO={yolo_id}, POSE={pose_id}, method={match_method}, score={score:.3f}, count={state['match_count']}, {status}")
@@ -544,10 +551,16 @@ class PoseTrackerV4:
         cv2.rectangle(overlay, (0, 0), (w, hud_h), (0, 0, 0), -1)
         annotated = cv2.addWeighted(overlay, 0.3, annotated, 0.7, 0)  # 30% 투명
 
-        # --- 시간 계산 (30fps 가정) ---
-        seconds = self.frame_index // 30
-        frames_mod = self.frame_index % 30
-        time_str = time.strftime("%H:%M:%S", time.gmtime(seconds))
+        # --- 시간 계산 (실제 경과 시간 기반) ---
+        elapsed = time.time() - self.start_time if self.start_time else 0
+        hours = int(elapsed // 3600)
+        minutes = int((elapsed % 3600) // 60)
+        secs = int(elapsed % 60)
+        centiseconds = int((elapsed * 100) % 100)  # 1/100초 단위
+        time_str = f"{hours:02d}:{minutes:02d}:{secs:02d}.{centiseconds:02d}"
+        
+        # --- FPS 계산 ---
+        fps = self.frame_index / elapsed if elapsed > 0 else 0
         
         # --- 통계 계산 ---
         current_people_count = sum(1 for p in self.persons.values() if p['matched_this_frame'])  # 현재 인원
@@ -555,7 +568,7 @@ class PoseTrackerV4:
         cumulative_yolo_swaps = sum(len(stat['yolo_ids']) for stat in self.stats.values())  # 총 YOLO ID 변경 수
         
         # --- HUD 텍스트 ---
-        stats_text = f"{time_str}:{frames_mod:02d} | NOW: {current_people_count} | CHANGE: YOLO({cumulative_yolo_swaps}) vs POSE({cumulative_pose_ids})"
+        stats_text = f"{time_str} [{fps:.1f}fps] | NOW: {current_people_count} | YOLO({cumulative_yolo_swaps}) vs POSE({cumulative_pose_ids})"
         
         font_scale = 1.5
         thickness = 3
@@ -679,11 +692,24 @@ if __name__ == "__main__":
     window_name = "PoseTracker v4.2 (YOLO + Pose ID)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
-    # --- 카운트다운 (10초) ---
-    print("🎥 녹화 준비! 10초 후에 시작합니다... (스페이스바: 즉시 시작)")
-    for i in range(10, 0, -1):
+    # --- 카운트다운 (20초) ---
+    print("🎥 녹화 준비! 20초 후에 시작합니다... (스페이스바: 즉시 시작)")
+    
+    # 배경 이미지 로드
+    intro_image_path = r"D:\git\detectron2\images\tracker_intro.png"
+    intro_img = cv2.imread(intro_image_path)
+    if intro_img is not None:
+        intro_img = cv2.resize(intro_img, (1280, 720))  # 720p로 리사이즈
+    else:
+        print(f"⚠️ 이미지를 찾을 수 없음 (기본 배경 사용): {intro_image_path}")
+        intro_img = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    for i in range(20, 0, -1):
         print(f"⏳ {i}...")
-        countdown_img = np.zeros((720, 1280, 3), dtype=np.uint8)
+        
+        countdown_img = intro_img.copy()
+        
+        # 텍스트 그림자 효과 (가독성 향상)
         text = f"Rec Start in {i}"
         sub_text = "Press SPACE to Start Now"
         
@@ -691,9 +717,14 @@ if __name__ == "__main__":
         (tw, th), _ = cv2.getTextSize(text, font, 3, 5)
         tx, ty = (1280 - tw) // 2, (720 + th) // 2
         
+        # 그림자
+        cv2.putText(countdown_img, text, (tx + 5, ty + 5), font, 3, (0, 0, 0), 10, cv2.LINE_AA)
+        cv2.putText(countdown_img, sub_text, (405, 605), font, 1, (0, 0, 0), 4, cv2.LINE_AA)
+        
+        # 메인 텍스트
         cv2.putText(countdown_img, text, (tx, ty), font, 3, (255, 255, 255), 5, cv2.LINE_AA)
         cv2.putText(countdown_img, sub_text, (400, 600), font, 1, (200, 200, 200), 2, cv2.LINE_AA)
-        
+
         cv2.imshow(window_name, countdown_img)
         
         key = cv2.waitKey(1000)
@@ -702,6 +733,19 @@ if __name__ == "__main__":
             break
         elif key == ord('q'):
             exit()
+
+    # --- 추론 시작 알림 화면 (첫 프레임 로딩 딜레이 대응) ---
+    print("🚀 추론 시작! (모델 웜업 중...)")
+    loading_img = intro_img.copy() if 'intro_img' in locals() and intro_img is not None else np.zeros((720, 1280, 3), dtype=np.uint8)
+    
+    # 반투명 검은색 레이어 추가
+    overlay = loading_img.copy()
+    cv2.rectangle(overlay, (0, 0), (1280, 720), (0, 0, 0), -1)
+    loading_img = cv2.addWeighted(overlay, 0.6, loading_img, 0.4, 0)
+    
+    cv2.putText(loading_img, "Starting Inference...", (380, 360), font, 1.5, (255, 255, 255), 3, cv2.LINE_AA)
+    cv2.imshow(window_name, loading_img)
+    cv2.waitKey(500)  # 화면 갱신 대기
 
     # --- 메인 루프 ---
     last_reset_time = None

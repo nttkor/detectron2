@@ -12,7 +12,7 @@ runs/
 tests/
 utils/
 wandb/
-*.mp4
+# *.mp4
 *.jpg
 *.png
 *.jpeg
