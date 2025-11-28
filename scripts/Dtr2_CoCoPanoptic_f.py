@@ -309,11 +309,11 @@ def visualize_cv2_all(img_bgr, seg_map, segments_info, filename, inference_time,
         mask = seg_map == cid
         if not np.any(mask):
             continue
-
+        
         mask_resized = cv2.resize(
             mask.astype(np.uint8), (target_w, target_h), interpolation=cv2.INTER_NEAREST
         )
-
+        
         b, g, r = get_color(i)
         overlay_stuff[mask_resized > 0] = (b, g, r)
 
@@ -324,7 +324,7 @@ def visualize_cv2_all(img_bgr, seg_map, segments_info, filename, inference_time,
     for i, cid in enumerate(unique_ids):
         if cid not in inst_info:
             continue
-
+            
         info = inst_info[cid]
         is_thing = info.get("isthing", False)
         if not is_thing:
@@ -333,12 +333,12 @@ def visualize_cv2_all(img_bgr, seg_map, segments_info, filename, inference_time,
         mask = seg_map == cid
         if not np.any(mask):
             continue
-
+        
         mask_resized = cv2.resize(
             mask.astype(np.uint8), (target_w, target_h), interpolation=cv2.INTER_NEAREST
         )
         mask_resized = (mask_resized * 255).astype(np.uint8)
-
+        
         b, g, r = get_color(i)
         contours, _ = cv2.findContours(
             mask_resized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -348,7 +348,7 @@ def visualize_cv2_all(img_bgr, seg_map, segments_info, filename, inference_time,
     # 라벨 + 신뢰도 텍스트 (Dtr2_CoCOpanoptic._ex.py Contour 모드와 동일한 스타일)
     font_scale = cv2.getFontScaleFromHeight(cv2.FONT_HERSHEY_SIMPLEX, 12, 1)
     font_thickness = 1
-
+    
     for i, cid in enumerate(unique_ids):
         if cid not in inst_info:
             continue
