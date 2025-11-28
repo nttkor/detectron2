@@ -1,0 +1,111 @@
+openapi: 3.0.0
+info:
+  title: CCTV User Guidance System API
+  description: API for connecting mobile clients to the CCTV tracking server for visually impaired guidance.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Local Development Server
+
+paths:
+  /connect:
+    post:
+      summary: Connect mobile device to server
+      description: Establishes a session for the user device.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - device_id
+              properties:
+                device_id:
+                  type: string
+                  example: "uuid-550e8400-e29b"
+                version:
+                  type: string
+                  example: "1.0.0"
+      responses:
+        '200':
+          description: Connection successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "connected"
+                  session_id:
+                    type: string
+                    example: "sess_abc123"
+  
+  /guidance/{device_id}:
+    get:
+      summary: Real-time guidance stream
+      description: WebSocket endpoint for receiving guidance messages.
+      parameters:
+        - in: path
+          name: device_id
+          schema:
+            type: string
+          required: true
+          description: Unique ID of the device
+      responses:
+        '101':
+          description: Switching Protocols to WebSocket
+
+  /admin/cctv:
+    get:
+      summary: List all connected CCTVs
+      responses:
+        '200':
+          description: A list of CCTVs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CCTV'
+    post:
+      summary: Register a new CCTV
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CCTV'
+      responses:
+        '201':
+          description: CCTV registered successfully
+
+components:
+  schemas:
+    CCTV:
+      type: object
+      properties:
+        id:
+          type: integer
+        location_name:
+          type: string
+        rtsp_url:
+          type: string
+        status:
+          type: string
+          enum: [active, inactive]
+
+    TrackingLog:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        pose_id:
+          type: integer
+        bbox:
+          type: array
+          items:
+            type: integer
+
