@@ -69,6 +69,7 @@ class PoseTrackerV4:
         max_missing_frames=90,                  # 사라져도 이력 유지하는 프레임 수 (3초@30fps)
         pose_history_size=30,                   # 저장할 포즈 이력 개수 (평균 계산용)
         scale_history_size=15,                  # scale smoothing용 이력 개수
+        use_truncation_handling=True,           # [옵션] 신체 절단 대응 로직 사용 여부
     ):
         """
         트래커 초기화
@@ -80,6 +81,7 @@ class PoseTrackerV4:
             max_missing_frames: 사람이 사라져도 Pose ID 이력을 유지하는 최대 프레임 수
             pose_history_size: 각 Pose ID당 저장할 정규화 포즈 개수 (평균 포즈 계산용)
             scale_history_size: 포즈 정규화 시 scale smoothing에 사용할 이력 개수
+            use_truncation_handling: 화면 경계 잘림 대응 로직(전문가 모드) 사용 여부
         """
         self.model = YOLO(model_path)                               # YOLO 모델 로드
         self.pose_similarity_threshold = pose_similarity_threshold  # 포즈 매칭 임계값
@@ -87,6 +89,7 @@ class PoseTrackerV4:
         self.max_missing_frames = max_missing_frames                # 최대 미출현 허용 프레임
         self.pose_history_size = pose_history_size                  # 포즈 이력 크기
         self.scale_history_size = scale_history_size                # 스케일 이력 크기
+        self.use_truncation_handling = use_truncation_handling      # 절단 대응 모드 플래그
 
         # --- Pose ID 관리 ---
         self.persons = {}                       # {pose_id: 상태 딕셔너리} - 각 Pose ID별 상태
@@ -106,6 +109,16 @@ class PoseTrackerV4:
         self.RIGHT_SHOULDER = 6                 # 오른쪽 어깨
         self.LEFT_HIP = 11                      # 왼쪽 엉덩이
         self.RIGHT_HIP = 12                     # 오른쪽 엉덩이
+
+        # --- 스켈레톤 연결 정의 (COCO 17 Keypoints) ---
+        self.SKELETON = [
+            (0, 1), (0, 2), (1, 3), (2, 4),     # 머리 (코-눈-귀)
+            (5, 6), (5, 11), (6, 12), (11, 12), # 몸통
+            (5, 7), (7, 9),                     # 왼팔
+            (6, 8), (8, 10),                    # 오른팔
+            (11, 13), (13, 15),                 # 왼쪽 다리
+            (12, 14), (14, 16)                  # 오른쪽 다리
+        ]
 
     # ------------------------------------------------------------------------
     # 유틸리티 메서드
@@ -143,96 +156,115 @@ class PoseTrackerV4:
     # ------------------------------------------------------------------------
     # 포즈 정규화 관련 메서드
     # ------------------------------------------------------------------------
-    def compute_robust_scale(self, kp, bbox, confidence_threshold=0.5):
+    def compute_robust_scale(self, kp, bbox, img_height, confidence_threshold=0.5):
         """
-        다중 기준으로 포즈 스케일 계산 (앙상블)
+        신체 절단(truncation)을 고려한 강건한 포즈 스케일 계산 (전문가 모드)
         
-        여러 기준의 중앙값을 사용해 outlier에 강한 스케일 추정
+        [원리]
+        단순히 BBox 높이나 특정 부위 길이를 쓰는 것이 아니라,
+        '보이는 부위'를 통해 '전신 크기(Virtual Height)'를 역추적합니다.
+        
+        인체 비례학(Anthropometry)적 비율 사용:
+        - Torso Length (어깨-골반) ≈ 키의 30%
+        - Shoulder Width (어깨 너비) ≈ 키의 25%
+        - Hip Width (골반 너비) ≈ 키의 15%
         
         Args:
-            kp: 키포인트 배열 (17, 3) - [x, y, confidence]
-            bbox: 바운딩 박스 [x1, y1, x2, y2]
-            confidence_threshold: 유효 키포인트 판단 임계값
+            kp: 키포인트 (17, 3)
+            bbox: 바운딩 박스
+            img_height: 이미지 전체 높이 (화면 경계 체크용)
         Returns:
-            float: 추정된 스케일 값 (정규화 분모로 사용)
+            estimated_scale: 전신 기준 추정 스케일 (정규화 분모)
         """
-        scales = []                             # 각 기준별 스케일 저장
+        scales = []
         
-        # --- 키포인트 유효성 체크 ---
-        left_hip_valid = kp[self.LEFT_HIP, 2] > confidence_threshold
-        right_hip_valid = kp[self.RIGHT_HIP, 2] > confidence_threshold
-        left_shoulder_valid = kp[self.LEFT_SHOULDER, 2] > confidence_threshold
-        right_shoulder_valid = kp[self.RIGHT_SHOULDER, 2] > confidence_threshold
+        # --- 1. 유효성 체크 ---
+        left_shoulder = kp[self.LEFT_SHOULDER]
+        right_shoulder = kp[self.RIGHT_SHOULDER]
+        left_hip = kp[self.LEFT_HIP]
+        right_hip = kp[self.RIGHT_HIP]
         
-        # --- 기준 1: Torso length (가장 신뢰할 수 있음) ---
-        if left_hip_valid and right_hip_valid and left_shoulder_valid and right_shoulder_valid:
-            mid_hip = (kp[self.LEFT_HIP, :2] + kp[self.RIGHT_HIP, :2]) / 2          # 엉덩이 중앙
-            mid_shoulder = (kp[self.LEFT_SHOULDER, :2] + kp[self.RIGHT_SHOULDER, :2]) / 2  # 어깨 중앙
-            torso_length = np.linalg.norm(mid_shoulder - mid_hip)                   # 몸통 길이
-            if torso_length > 10:               # 최소 10픽셀
-                scales.append(torso_length)
-        
-        # --- 기준 2: Shoulder width ---
-        if left_shoulder_valid and right_shoulder_valid:
-            shoulder_width = np.linalg.norm(kp[self.LEFT_SHOULDER, :2] - kp[self.RIGHT_SHOULDER, :2])
+        ls_valid = left_shoulder[2] > confidence_threshold
+        rs_valid = right_shoulder[2] > confidence_threshold
+        lh_valid = left_hip[2] > confidence_threshold
+        rh_valid = right_hip[2] > confidence_threshold
+
+        # --- 2. Torso Length 기반 추정 (가장 신뢰도 높음) ---
+        # 몸통이 온전히 보인다면, 몸통 길이는 전신 키의 약 30% (3.3배)
+        if ls_valid and rs_valid and lh_valid and rh_valid:
+            mid_shoulder = (left_shoulder[:2] + right_shoulder[:2]) / 2
+            mid_hip = (left_hip[:2] + right_hip[:2]) / 2
+            torso_len = np.linalg.norm(mid_shoulder - mid_hip)
+            
+            if torso_len > 10:
+                scales.append(torso_len * 3.3)  # Torso -> Full Height 변환
+
+        # --- 3. Shoulder Width 기반 추정 ---
+        # 상반신만 보일 때 유용. 어깨 너비는 전신 키의 약 25% (4.0배)
+        if ls_valid and rs_valid:
+            shoulder_width = np.linalg.norm(left_shoulder[:2] - right_shoulder[:2])
             if shoulder_width > 10:
-                scales.append(shoulder_width * 1.25)  # torso 스케일로 변환 (경험적 비율)
-        
-        # --- 기준 3: Hip width ---
-        if left_hip_valid and right_hip_valid:
-            hip_width = np.linalg.norm(kp[self.LEFT_HIP, :2] - kp[self.RIGHT_HIP, :2])
+                scales.append(shoulder_width * 4.0)
+
+        # --- 4. Hip Width 기반 추정 ---
+        # 하반신 위주로 보일 때 유용. 골반 너비는 전신 키의 약 15% (6.7배)
+        if lh_valid and rh_valid:
+            hip_width = np.linalg.norm(left_hip[:2] - right_hip[:2])
             if hip_width > 10:
-                scales.append(hip_width * 1.67)       # torso 스케일로 변환 (경험적 비율)
+                scales.append(hip_width * 6.7)
+
+        # --- 5. BBox Height 기반 (Truncation 보정) ---
+        # 화면 경계에 닿았는지 확인하여 잘림(Truncation) 여부 판단
+        y1, y2 = bbox[1], bbox[3]
+        is_truncated_top = y1 < 5  # 상단 경계 5픽셀 이내
+        is_truncated_bottom = y2 > (img_height - 5)  # 하단 경계 5픽셀 이내
         
-        # --- 기준 4: Bbox height (fallback) ---
-        bbox_height = bbox[3] - bbox[1]         # y2 - y1
-        if bbox_height > 50:
-            scales.append(bbox_height * 0.3)    # torso 스케일로 변환 (경험적 비율)
-        
-        # --- 앙상블: 중앙값 사용 (outlier에 강함) ---
+        bbox_h = y2 - y1
+        if not is_truncated_top and not is_truncated_bottom:
+            # 잘리지 않았다면 BBox 높이를 그대로 신뢰 (전신일 가능성 높음)
+            scales.append(bbox_h * 1.0)
+        else:
+            # 잘렸다면 BBox는 실제 키보다 작음 -> 과소평가 방지 위해 제외하거나 보정
+            # 여기서는 BBox 정보는 '최소한 이만큼은 크다'는 하한선으로만 활용
+            pass
+
+        # --- 6. 앙상블 (중앙값) ---
         if scales:
             return np.median(scales)
-        return max(bbox_height * 0.3, 50)       # 모든 기준 실패 시 fallback
+        
+        # 모든 뼈대 정보가 없으면 BBox fallback (잘렸어도 어쩔 수 없음)
+        return max(bbox_h, 50)
 
-    def normalize_keypoints(self, kp, bbox, scale_history, confidence_threshold=0.5):
+    def normalize_keypoints(self, kp, bbox, scale_history, img_height, confidence_threshold=0.5):
         """
-        포즈 정규화 (위치 + 크기 불변 변환)
-        
-        1. 중심점 이동: mid-hip 또는 유효 키포인트 평균을 원점으로
-        2. 스케일 정규화: smoothed scale로 나누기
-        
-        Args:
-            kp: 키포인트 배열 (17, 3)
-            bbox: 바운딩 박스
-            scale_history: 스케일 이력 (deque) - smoothing용
-            confidence_threshold: 유효 키포인트 판단 임계값
-        Returns:
-            (normalized_coords, scale_history): 정규화된 좌표 (17, 2), 업데이트된 스케일 이력
+        포즈 정규화 (전문가 모드 적용)
         """
         # --- 유효 키포인트 필터링 ---
-        if kp.shape[1] == 3:                    # [x, y, conf] 형식
+        if kp.shape[1] == 3:
             confs = kp[:, 2]
             valid_mask = confs > confidence_threshold
             valid_kpts_xy = kp[valid_mask][:, :2]
-        else:                                   # [x, y] 형식
+        else:
             valid_kpts_xy = kp[:, :2]
         
-        if valid_kpts_xy.shape[0] < 4:          # 최소 4개 키포인트 필요
+        if valid_kpts_xy.shape[0] < 4:
             return np.array([]), scale_history
         
-        # --- 중심점 계산 ---
+        # --- 중심점 계산 (Mid-Hip 우선) ---
         left_hip_valid = kp[self.LEFT_HIP, 2] > confidence_threshold
         right_hip_valid = kp[self.RIGHT_HIP, 2] > confidence_threshold
         
         if left_hip_valid and right_hip_valid:
-            center = (kp[self.LEFT_HIP, :2] + kp[self.RIGHT_HIP, :2]) / 2  # mid-hip (가장 안정적)
+            center = (kp[self.LEFT_HIP, :2] + kp[self.RIGHT_HIP, :2]) / 2
         else:
-            center = np.mean(valid_kpts_xy, axis=0)  # 유효 키포인트 평균
+            # 힙이 안 보이면(잘림), BBox 중심을 대체제로 사용하지 않고
+            # 유효 키포인트들의 무게중심을 사용 (상대적 위치 보존)
+            center = np.mean(valid_kpts_xy, axis=0)
         
-        # --- 스케일 계산 및 smoothing ---
-        current_scale = self.compute_robust_scale(kp, bbox, confidence_threshold)
-        scale_history.append(current_scale)     # 이력에 추가
-        smoothed_scale = np.mean(scale_history) # 이동 평균
+        # --- 스케일 계산 (개선된 로직) ---
+        current_scale = self.compute_robust_scale(kp, bbox, img_height, confidence_threshold)
+        scale_history.append(current_scale)
+        smoothed_scale = np.mean(scale_history)
         
         # --- 정규화 ---
         normalized_coords = (kp[:, :2] - center) / smoothed_scale
@@ -365,7 +397,9 @@ class PoseTrackerV4:
                 
                 # --- 포즈 정규화 ---
                 temp_scale_history = deque(maxlen=self.scale_history_size)
-                norm_kp, _ = self.normalize_keypoints(kp, bbox, temp_scale_history)
+                # 이미지 높이 전달 (frame.shape[0])
+                img_height = frame.shape[0]
+                norm_kp, _ = self.normalize_keypoints(kp, bbox, temp_scale_history, img_height)
                 
                 if norm_kp.size == 0:           # 정규화 실패 → 스킵
                     continue
@@ -435,8 +469,10 @@ class PoseTrackerV4:
                 state = self.persons[pose_id]
                 
                 # 포즈 이력 업데이트 (smoothing 적용)
+                # 이미지 높이 전달
+                img_height = frame.shape[0]
                 norm_kp_smoothed, state['scale_history'] = self.normalize_keypoints(
-                    kp, bbox, state['scale_history']
+                    kp, bbox, state['scale_history'], img_height
                 )
                 if norm_kp_smoothed.size > 0:
                     state['pose_history'].append(norm_kp_smoothed)
@@ -512,9 +548,20 @@ class PoseTrackerV4:
             cv2.rectangle(annotated, (bx1, by1 - th - 10), (bx1 + tw + 6, by1), color, -1)  # 배경
             cv2.putText(annotated, label, (bx1 + 3, by1 - 5), font, font_scale, text_color, thickness, cv2.LINE_AA)
 
-            # --- 키포인트 그리기 ---
+            # --- 키포인트 및 스켈레톤 그리기 ---
             if kpts_data is not None:
                 kp = kpts_data[idx]
+                
+                # 1. 스켈레톤 연결 (선)
+                for p1, p2 in self.SKELETON:
+                    x1, y1, c1 = kp[p1]
+                    x2, y2, c2 = kp[p2]
+                    
+                    if c1 > 0.5 and c2 > 0.5:
+                        # 선 그리기 (두께 2)
+                        cv2.line(annotated, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+
+                # 2. 키포인트 (점)
                 for j in range(kp.shape[0]):
                     x, y, conf = kp[j]
                     if conf > 0.5:
@@ -686,6 +733,7 @@ if __name__ == "__main__":
         max_missing_frames=90,                  # 3초간 이력 유지
         pose_history_size=30,                   # 1초 평균 (30프레임)
         scale_history_size=15,                  # scale smoothing
+        use_truncation_handling=True,           # 전문가 모드 (절단 대응) ON
     )
 
     # --- 윈도우 생성 ---

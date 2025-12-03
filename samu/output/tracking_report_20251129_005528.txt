@@ -1,0 +1,140 @@
+PoseTracker Analysis Report
+Date: 2025-11-29 00:57:03
+========================================
+
+Total Frames Processed: 1010
+Total Pose IDs Created: 22
+
+ID Stability Analysis (PID vs YID)
+----------------------------------------
+[Pose ID 1]
+  - Duration: 753 frames
+  - Associated YOLO IDs (8): [1, 121, 129, 141, 164, 184, 217, 837]
+  - ⭐ Re-ID Success! Maintained identity across 8 YOLO tracks.
+  - Stability Score: 0.12 (Lower is better for single ID)
+
+[Pose ID 2]
+  - Duration: 535 frames
+  - Associated YOLO IDs (16): [2, 70, 233, 288, 313, 339, 353, 385, 395, 455, 477, 492, 575, 609, 615, 702]
+  - ⭐ Re-ID Success! Maintained identity across 16 YOLO tracks.
+  - Stability Score: 0.06 (Lower is better for single ID)
+
+[Pose ID 3]
+  - Duration: 725 frames
+  - Associated YOLO IDs (9): [3, 154, 169, 228, 229, 715, 854, 869, 939]
+  - ⭐ Re-ID Success! Maintained identity across 9 YOLO tracks.
+  - Stability Score: 0.11 (Lower is better for single ID)
+
+[Pose ID 4]
+  - Duration: 1010 frames
+  - Associated YOLO IDs (11): [4, 16, 56, 432, 545, 583, 601, 638, 640, 723, 1045]
+  - ⭐ Re-ID Success! Maintained identity across 11 YOLO tracks.
+  - Stability Score: 0.09 (Lower is better for single ID)
+
+[Pose ID 5]
+  - Duration: 1010 frames
+  - Associated YOLO IDs (25): [5, 51, 108, 150, 156, 165, 177, 190, 213, 239, 254, 269, 311, 501, 508, 566, 827, 875, 993, 1220, 1275, 1300, 1326, 1339, 1372]
+  - ⭐ Re-ID Success! Maintained identity across 25 YOLO tracks.
+  - Stability Score: 0.04 (Lower is better for single ID)
+
+[Pose ID 6]
+  - Duration: 564 frames
+  - Associated YOLO IDs (16): [6, 25, 29, 39, 46, 49, 80, 114, 124, 163, 182, 205, 576, 608, 625, 669]
+  - ⭐ Re-ID Success! Maintained identity across 16 YOLO tracks.
+  - Stability Score: 0.06 (Lower is better for single ID)
+
+[Pose ID 7]
+  - Duration: 753 frames
+  - Associated YOLO IDs (4): [7, 153, 186, 981]
+  - ⭐ Re-ID Success! Maintained identity across 4 YOLO tracks.
+  - Stability Score: 0.25 (Lower is better for single ID)
+
+[Pose ID 8]
+  - Duration: 633 frames
+  - Associated YOLO IDs (10): [155, 343, 352, 382, 562, 579, 635, 696, 753, 809]
+  - ⭐ Re-ID Success! Maintained identity across 10 YOLO tracks.
+  - Stability Score: 0.10 (Lower is better for single ID)
+
+[Pose ID 9]
+  - Duration: 876 frames
+  - Associated YOLO IDs (13): [171, 185, 220, 238, 255, 281, 286, 519, 525, 1141, 1156, 1215, 1216]
+  - ⭐ Re-ID Success! Maintained identity across 13 YOLO tracks.
+  - Stability Score: 0.08 (Lower is better for single ID)
+
+[Pose ID 10]
+  - Duration: 807 frames
+  - Associated YOLO IDs (16): [287, 297, 312, 345, 378, 427, 467, 822, 949, 995, 1058, 1095, 1137, 1143, 1151, 1171]
+  - ⭐ Re-ID Success! Maintained identity across 16 YOLO tracks.
+  - Stability Score: 0.06 (Lower is better for single ID)
+
+[Pose ID 11]
+  - Duration: 803 frames
+  - Associated YOLO IDs (20): [290, 298, 388, 402, 680, 685, 795, 961, 994, 1014, 1018, 1028, 1035, 1038, 1068, 1101, 1111, 1150, 1169, 1192]
+  - ⭐ Re-ID Success! Maintained identity across 20 YOLO tracks.
+  - Stability Score: 0.05 (Lower is better for single ID)
+
+[Pose ID 12]
+  - Duration: 447 frames
+  - Associated YOLO IDs (18): [436, 493, 499, 543, 560, 564, 582, 614, 636, 671, 689, 725, 732, 749, 777, 801, 833, 840]
+  - ⭐ Re-ID Success! Maintained identity across 18 YOLO tracks.
+  - Stability Score: 0.06 (Lower is better for single ID)
+
+[Pose ID 13]
+  - Duration: 402 frames
+  - Associated YOLO IDs (3): [495, 521, 736]
+  - ⭐ Re-ID Success! Maintained identity across 3 YOLO tracks.
+  - Stability Score: 0.33 (Lower is better for single ID)
+
+[Pose ID 14]
+  - Duration: 413 frames
+  - Associated YOLO IDs (6): [522, 535, 724, 752, 836, 844]
+  - ⭐ Re-ID Success! Maintained identity across 6 YOLO tracks.
+  - Stability Score: 0.17 (Lower is better for single ID)
+
+[Pose ID 15]
+  - Duration: 99 frames
+  - Associated YOLO IDs (3): [892, 928, 935]
+  - ⭐ Re-ID Success! Maintained identity across 3 YOLO tracks.
+  - Stability Score: 0.33 (Lower is better for single ID)
+
+[Pose ID 16]
+  - Duration: 339 frames
+  - Associated YOLO IDs (16): [894, 996, 1040, 1077, 1084, 1108, 1116, 1128, 1152, 1164, 1177, 1200, 1226, 1241, 1256, 1298]
+  - ⭐ Re-ID Success! Maintained identity across 16 YOLO tracks.
+  - Stability Score: 0.06 (Lower is better for single ID)
+
+[Pose ID 17]
+  - Duration: 255 frames
+  - Associated YOLO IDs (3): [998, 1140, 1173]
+  - ⭐ Re-ID Success! Maintained identity across 3 YOLO tracks.
+  - Stability Score: 0.33 (Lower is better for single ID)
+
+[Pose ID 18]
+  - Duration: 137 frames
+  - Associated YOLO IDs (2): [1142, 1204]
+  - ⭐ Re-ID Success! Maintained identity across 2 YOLO tracks.
+  - Stability Score: 0.50 (Lower is better for single ID)
+
+[Pose ID 19]
+  - Duration: 123 frames
+  - Associated YOLO IDs (7): [1158, 1172, 1207, 1225, 1242, 1268, 1273]
+  - ⭐ Re-ID Success! Maintained identity across 7 YOLO tracks.
+  - Stability Score: 0.14 (Lower is better for single ID)
+
+[Pose ID 20]
+  - Duration: 54 frames
+  - Associated YOLO IDs (5): [1274, 1284, 1299, 1330, 1375]
+  - ⭐ Re-ID Success! Maintained identity across 5 YOLO tracks.
+  - Stability Score: 0.20 (Lower is better for single ID)
+
+[Pose ID 21]
+  - Duration: 50 frames
+  - Associated YOLO IDs (3): [1277, 1285, 1369]
+  - ⭐ Re-ID Success! Maintained identity across 3 YOLO tracks.
+  - Stability Score: 0.33 (Lower is better for single ID)
+
+[Pose ID 22]
+  - Duration: 21 frames
+  - Associated YOLO IDs (3): [1332, 1340, 1365]
+  - ⭐ Re-ID Success! Maintained identity across 3 YOLO tracks.
+  - Stability Score: 0.33 (Lower is better for single ID)
